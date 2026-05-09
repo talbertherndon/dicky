@@ -1512,11 +1512,13 @@ extension OpenClickyTTSClient {
 @MainActor
 final class OpenAIRealtimeSpeechClient: OpenClickyTTSClient {
     nonisolated static let streamSampleRate: Double = 24_000
-    private static let defaultVoiceID = "marin"
+    private nonisolated static let defaultVoiceID = "marin"
 
     struct BidirectionalVoiceTurnResult {
         let userTranscript: String
         let assistantTranscript: String
+        let didCreateAssistantResponse: Bool
+        let wasRoutedByClient: Bool
     }
 
     private var apiKey: String?
@@ -1529,7 +1531,7 @@ final class OpenAIRealtimeSpeechClient: OpenClickyTTSClient {
     private var streamingTask: Task<Void, Error>?
     private var activeBidirectionalVoiceTurn: BidirectionalVoiceTurn?
 
-    init(apiKey: String?, model: String, voiceID: String = defaultVoiceID) {
+    init(apiKey: String?, model: String, voiceID: String = "marin") {
         self.apiKey = apiKey?.trimmingCharacters(in: .whitespacesAndNewlines)
         self.model = model
         self.voiceID = voiceID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -1690,7 +1692,7 @@ final class OpenAIRealtimeSpeechClient: OpenClickyTTSClient {
         let instructions = [
             systemPrompt,
             historyText.isEmpty ? nil : "Recent conversation:\n\(historyText)",
-            "You are in OpenClicky's bidirectional Realtime voice mode. Listen to the user's live microphone audio directly and reply out loud as OpenClicky in one concise spoken answer. Do not mention transcription, Whisper, markdown, or [POINT:] tags."
+            "You are in OpenClicky's bidirectional Realtime voice mode. Listen to the user's live microphone audio directly and reply out loud as OpenClicky in one concise spoken answer. Do not claim you will start background work, take care of a task, or start an agent unless the app already routed the turn before you receive it. Do not mention transcription, Whisper, markdown, or [POINT:] tags."
         ].compactMap { $0 }.joined(separator: "\n\n")
 
         try await sendJSON([
@@ -1705,6 +1707,9 @@ final class OpenAIRealtimeSpeechClient: OpenClickyTTSClient {
                         "format": [
                             "type": "audio/pcm",
                             "rate": Int(Self.streamSampleRate)
+                        ],
+                        "transcription": [
+                            "model": "gpt-4o-mini-transcribe"
                         ],
                         "turn_detection": NSNull()
                     ],
@@ -1734,14 +1739,20 @@ final class OpenAIRealtimeSpeechClient: OpenClickyTTSClient {
         turn.startReceiving()
     }
 
-    func finishBidirectionalVoiceTurn() async throws -> BidirectionalVoiceTurnResult {
+    func finishBidirectionalVoiceTurn(
+        routeCommittedUserTranscript: @escaping @MainActor @Sendable (String) -> Bool = { _ in false }
+    ) async throws -> BidirectionalVoiceTurnResult {
         guard let activeBidirectionalVoiceTurn else {
             throw CancellationError()
         }
         self.activeBidirectionalVoiceTurn = nil
         do {
-            let result = try await activeBidirectionalVoiceTurn.finish()
-            stopPlaybackInternal()
+            let result = try await activeBidirectionalVoiceTurn.finish(
+                routeCommittedUserTranscript: routeCommittedUserTranscript
+            )
+            if result.didCreateAssistantResponse {
+                stopPlaybackInternal()
+            }
             return result
         } catch {
             activeBidirectionalVoiceTurn.cancel()
@@ -1980,6 +1991,9 @@ final class OpenAIRealtimeSpeechClient: OpenClickyTTSClient {
         private let onAssistantTextChunk: @MainActor @Sendable (String) -> Void
         private let onPlaybackStarted: @MainActor @Sendable () -> Void
         private var receiveTask: Task<BidirectionalVoiceTurnResult, Error>?
+        private let transcriptLock = NSLock()
+        private var latestUserTranscript = ""
+        private var hasCompletedUserTranscript = false
         private var hasInstalledInputTap = false
         private var didStartPlayback = false
 
@@ -2035,9 +2049,27 @@ final class OpenAIRealtimeSpeechClient: OpenClickyTTSClient {
             }
         }
 
-        func finish() async throws -> BidirectionalVoiceTurnResult {
+        func finish(
+            routeCommittedUserTranscript: @escaping @MainActor @Sendable (String) -> Bool
+        ) async throws -> BidirectionalVoiceTurnResult {
             stopInputCapture()
             try await sendJSON(["type": "input_audio_buffer.commit"])
+
+            let committedTranscript = await waitForCommittedUserTranscript(timeoutNanoseconds: 5_000_000_000)
+            if await MainActor.run(body: { routeCommittedUserTranscript(committedTranscript) }) {
+                receiveTask?.cancel()
+                receiveTask = nil
+                playerNode.stop()
+                outputEngine.stop()
+                webSocket.cancel(with: .normalClosure, reason: nil)
+                return BidirectionalVoiceTurnResult(
+                    userTranscript: committedTranscript,
+                    assistantTranscript: "",
+                    didCreateAssistantResponse: false,
+                    wasRoutedByClient: true
+                )
+            }
+
             try await sendJSON([
                 "type": "response.create",
                 "response": [
@@ -2105,8 +2137,15 @@ final class OpenAIRealtimeSpeechClient: OpenClickyTTSClient {
                     }
                 } else if type == "conversation.item.input_audio_transcription.completed",
                           let transcript = event["transcript"] as? String {
-                    userTranscript = transcript
-                    await MainActor.run { onUserTranscript(transcript) }
+                    let snapshot = recordUserTranscript(transcript, completed: true)
+                    userTranscript = snapshot
+                    await MainActor.run { onUserTranscript(snapshot) }
+                } else if (type == "conversation.item.input_audio_transcription.delta" || type == "conversation.item.input_audio_transcription.updated"),
+                          let delta = event["delta"] as? String,
+                          !delta.isEmpty {
+                    let snapshot = recordUserTranscript(userTranscript + delta, completed: false)
+                    userTranscript = snapshot
+                    await MainActor.run { onUserTranscript(snapshot) }
                 } else if type == "response.done" {
                     if assistantTranscript.isEmpty,
                        let extracted = OpenAIRealtimeSpeechClient.firstTranscriptString(in: event),
@@ -2131,8 +2170,39 @@ final class OpenAIRealtimeSpeechClient: OpenClickyTTSClient {
             }
             return BidirectionalVoiceTurnResult(
                 userTranscript: userTranscript.trimmingCharacters(in: .whitespacesAndNewlines),
-                assistantTranscript: assistantTranscript.trimmingCharacters(in: .whitespacesAndNewlines)
+                assistantTranscript: assistantTranscript.trimmingCharacters(in: .whitespacesAndNewlines),
+                didCreateAssistantResponse: true,
+                wasRoutedByClient: false
             )
+        }
+
+        private func recordUserTranscript(_ transcript: String, completed: Bool) -> String {
+            let normalized = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
+            transcriptLock.lock()
+            latestUserTranscript = normalized
+            hasCompletedUserTranscript = hasCompletedUserTranscript || completed
+            transcriptLock.unlock()
+            return normalized
+        }
+
+        private func currentUserTranscriptSnapshot() -> (transcript: String, completed: Bool) {
+            transcriptLock.lock()
+            let snapshot = (latestUserTranscript, hasCompletedUserTranscript)
+            transcriptLock.unlock()
+            return snapshot
+        }
+
+        private func waitForCommittedUserTranscript(timeoutNanoseconds: UInt64) async -> String {
+            let startedAt = Date()
+            while Date().timeIntervalSince(startedAt) < Double(timeoutNanoseconds) / 1_000_000_000 {
+                if Task.isCancelled { break }
+                let snapshot = currentUserTranscriptSnapshot()
+                if snapshot.completed {
+                    return snapshot.transcript
+                }
+                try? await Task.sleep(nanoseconds: 50_000_000)
+            }
+            return currentUserTranscriptSnapshot().transcript
         }
 
         private func sendJSON(_ payload: [String: Any]) async throws {
@@ -2143,7 +2213,7 @@ final class OpenAIRealtimeSpeechClient: OpenClickyTTSClient {
     }
 
 
-    private static func firstTranscriptString(in value: Any) -> String? {
+    private nonisolated static func firstTranscriptString(in value: Any) -> String? {
         if let string = value as? String { return string }
         if let dictionary = value as? [String: Any] {
             for key in ["transcript", "text"] {
@@ -2221,13 +2291,13 @@ final class OpenAIRealtimeSpeechClient: OpenClickyTTSClient {
         try await webSocket.send(.string(string))
     }
 
-    private func realtimeError(from event: [String: Any]) -> NSError {
+    private nonisolated func realtimeError(from event: [String: Any]) -> NSError {
         let errorPayload = event["error"] as? [String: Any]
         let message = errorPayload?["message"] as? String ?? "OpenAI Realtime playback failed."
         return NSError(domain: "OpenAIRealtimeSpeechClient", code: -2, userInfo: [NSLocalizedDescriptionKey: message])
     }
 
-    private static func int16Samples(fromLittleEndianPCM data: Data) -> [Int16] {
+    private nonisolated static func int16Samples(fromLittleEndianPCM data: Data) -> [Int16] {
         var samples: [Int16] = []
         samples.reserveCapacity(data.count / 2)
         var index = data.startIndex

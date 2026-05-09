@@ -100,6 +100,12 @@ private struct OpenClickyFolderOpenRequest {
     let instruction: String
 }
 
+private struct OpenClickyWebOpenRequest {
+    let url: URL
+    let displayName: String
+    let instruction: String
+}
+
 private struct OpenClickyReminderAddRequest {
     let title: String
     let instruction: String
@@ -2361,26 +2367,38 @@ final class CompanionManager: ObservableObject {
         realtimeBidirectionalVoiceTask = Task { [weak self] in
             do {
                 guard let self else { return }
-                let result = try await self.openAIRealtimeSpeechClient.finishBidirectionalVoiceTurn()
-                let assistantText = result.assistantTranscript.isEmpty ? "Done." : result.assistantTranscript
+                let result = try await self.openAIRealtimeSpeechClient.finishBidirectionalVoiceTurn(
+                    routeCommittedUserTranscript: { [weak self] transcript in
+                        self?.shouldRouteRealtimeVoiceTranscriptToApp(transcript) ?? false
+                    }
+                )
+                let routedByApp = result.wasRoutedByClient
+                let assistantText = result.assistantTranscript.isEmpty
+                    ? (result.didCreateAssistantResponse ? "Done." : "Routed to OpenClicky.")
+                    : result.assistantTranscript
                 let userTranscript = result.userTranscript.isEmpty ? "Realtime voice input" : result.userTranscript
 
                 await MainActor.run {
-                    self.lastTranscript = userTranscript
-                    self.conversationHistory.append((
-                        userTranscript: userTranscript,
-                        assistantResponse: assistantText
-                    ))
-                    if self.conversationHistory.count > 10 {
-                        self.conversationHistory.removeFirst(self.conversationHistory.count - 10)
+                    if routedByApp {
+                        _ = self.handleRealtimeVoiceTranscriptRouteIfNeeded(userTranscript, source: source)
                     }
-                    self.latestVoiceResponseCard = ClickyResponseCard(
-                        source: .voice,
-                        rawText: assistantText,
-                        contextTitle: userTranscript
-                    )
-                    self.updateVoiceResponseCaption(assistantText)
-                    self.voiceState = .idle
+                    self.lastTranscript = userTranscript
+                    if !routedByApp {
+                        self.conversationHistory.append((
+                            userTranscript: userTranscript,
+                            assistantResponse: assistantText
+                        ))
+                        if self.conversationHistory.count > 10 {
+                            self.conversationHistory.removeFirst(self.conversationHistory.count - 10)
+                        }
+                        self.latestVoiceResponseCard = ClickyResponseCard(
+                            source: .voice,
+                            rawText: assistantText,
+                            contextTitle: userTranscript
+                        )
+                        self.updateVoiceResponseCaption(assistantText)
+                        self.voiceState = .idle
+                    }
                     self.lastVoiceInteractionCompletedAt = Date()
                     self.scheduleWidgetSnapshotPublish()
                     OpenClickyMessageLogStore.shared.append(
@@ -2393,23 +2411,27 @@ final class CompanionManager: ObservableObject {
                             "speechVoice": self.openAIRealtimeSpeechClient.voiceID,
                             "inputPath": "realtime_input_audio_buffer",
                             "bypassesWhisper": true,
+                            "routedByApp": routedByApp,
+                            "createdRealtimeAssistantResponse": result.didCreateAssistantResponse,
                             "userTranscriptLength": result.userTranscript.count,
-                            "assistantTranscriptLength": assistantText.count,
+                            "assistantTranscriptLength": result.assistantTranscript.count,
                             "captureDurationMs": Self.elapsedMilliseconds(since: captureStartedAt),
                             "responseDurationMs": Self.elapsedMilliseconds(since: finishedAt)
                         ]
                     )
                 }
 
-                do {
-                    try self.codexHomeManager.appendPersistentMemoryEvent(
-                        userRequest: userTranscript,
-                        agentResponse: assistantText
-                    )
-                } catch {
-                    print("⚠️ OpenClicky memory update failed: \(error)")
+                if result.didCreateAssistantResponse {
+                    do {
+                        try self.codexHomeManager.appendPersistentMemoryEvent(
+                            userRequest: userTranscript,
+                            agentResponse: assistantText
+                        )
+                    } catch {
+                        print("⚠️ OpenClicky memory update failed: \(error)")
+                    }
+                    ClickyAnalytics.trackAIResponseReceived(response: assistantText)
                 }
-                ClickyAnalytics.trackAIResponseReceived(response: assistantText)
             } catch {
                 await MainActor.run {
                     self?.handleBidirectionalRealtimeVoiceFailure(error, source: source, stage: "finish")
@@ -2470,37 +2492,13 @@ final class CompanionManager: ObservableObject {
         lastObservedPartial = nil
         lastObservedPartialAt = nil
 
-        if handleAgentCancellationRequestIfNeeded(from: finalTranscript) {
-            return
-        }
-        if handleAgentStatusQuestionIfNeeded(from: finalTranscript) {
-            return
-        }
-        if handleAgentSelectionRequestIfNeeded(from: finalTranscript, source: "voice_final_transcript") {
-            return
-        }
-        if acceptPendingAgentOfferIfConfirmed(from: finalTranscript) {
-            return
-        }
-        if submitPendingAgentVoiceFollowUp(finalTranscript) {
-            return
-        }
-        if startExplicitAgentTaskIfRequested(from: finalTranscript) {
-            return
-        }
-        if startAgentTaskFromDeferredLiveAgentRouteIfNeeded(finalTranscript) {
-            return
-        }
-        if handleDirectComputerUseRequest(from: finalTranscript, source: "final_transcript") {
-            return
-        }
-        if handleQuickLocalVoiceResponseIfNeeded(from: finalTranscript) {
-            return
-        }
-        if submitContextualAgentFollowUp(finalTranscript, source: "voice") {
-            return
-        }
-        if startImplicitAgentTaskIfNeeded(from: finalTranscript) {
+        if routeFinalVoiceTranscriptActionIfNeeded(
+            finalTranscript,
+            source: "voice",
+            selectionSource: "voice_final_transcript",
+            directComputerUseSource: "final_transcript",
+            includeQuickLocalResponses: true
+        ) {
             return
         }
         // Remember this transcript as the candidate task in case Haiku's
@@ -2518,6 +2516,207 @@ final class CompanionManager: ObservableObject {
         }
 
         sendTranscriptToClaudeWithScreenshot(transcript: finalTranscript)
+    }
+
+    private func shouldRouteRealtimeVoiceTranscriptToApp(_ transcript: String) -> Bool {
+        let trimmedTranscript = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedTranscript.isEmpty else { return false }
+
+        if Self.isCancelAllAgentTasksRequest(trimmedTranscript)
+            || Self.isCancelCurrentAgentTaskRequest(trimmedTranscript)
+            || Self.isAgentStatusQuestion(trimmedTranscript)
+            || Self.agentSelectionRequest(from: trimmedTranscript) != nil {
+            return true
+        }
+
+        if let offeredAt = pendingAgentOfferAt,
+           pendingAgentOfferInstruction != nil,
+           Date().timeIntervalSince(offeredAt) <= Self.pendingAgentOfferTTL,
+           Self.isAffirmativeConfirmation(trimmedTranscript) {
+            return true
+        }
+
+        if pendingAgentVoiceFollowUpSessionID != nil {
+            return true
+        }
+
+        if Self.explicitNewTaskInstruction(from: trimmedTranscript) != nil
+            || Self.isIncompleteExplicitNewTaskRequest(from: trimmedTranscript)
+            || Self.agentTaskCreationInstruction(from: trimmedTranscript) != nil
+            || Self.isIncompleteAgentTaskCreationRequest(from: trimmedTranscript)
+            || Self.clickyAgentInstruction(from: trimmedTranscript) != nil
+            || Self.permissiveAgentInstruction(from: trimmedTranscript) != nil
+            || Self.implicitAgentTaskInstruction(from: trimmedTranscript) != nil {
+            return true
+        }
+
+        if let partialTranscript = deferredLiveAgentRoutePartial,
+           let partialAt = deferredLiveAgentRoutePartialAt,
+           Date().timeIntervalSince(partialAt) <= Self.deferredLiveAgentRoutePartialTTL,
+           Self.deferredLiveAgentRouteInstruction(
+               partialTranscript: partialTranscript,
+               finalTranscript: trimmedTranscript
+           ) != nil {
+            return true
+        }
+
+        if folderOpenRequest(from: trimmedTranscript) != nil
+            || Self.localAppOpenRequest(from: trimmedTranscript) != nil
+            || Self.webOpenRequest(from: trimmedTranscript) != nil
+            || Self.reminderAddRequest(from: trimmedTranscript) != nil
+            || Self.reminderCountRequest(from: trimmedTranscript) != nil
+            || Self.messagesSearchRequest(from: trimmedTranscript) != nil
+            || Self.nativeTypeRequest(from: trimmedTranscript) != nil
+            || Self.nativeKeyPressRequest(from: trimmedTranscript) != nil {
+            return true
+        }
+
+        if Self.isLikelyAgentFollowUpPhrasing(trimmedTranscript),
+           latestSteerableAgentSession() != nil {
+            return true
+        }
+
+        // GPT Realtime audio turns do not currently carry image input into the
+        // Realtime model. If the user asks about the screen, route the committed
+        // transcript back through OpenClicky's normal visual voice path so it
+        // can consume the screenshot that was prewarmed on key-down.
+        if Self.shouldAttachScreenContext(to: trimmedTranscript) {
+            return true
+        }
+
+        return false
+    }
+
+    @discardableResult
+    private func handleRealtimeVoiceTranscriptRouteIfNeeded(_ transcript: String, source: String) -> Bool {
+        let trimmedTranscript = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedTranscript.isEmpty else {
+            OpenClickyMessageLogStore.shared.append(
+                lane: "voice",
+                direction: "internal",
+                event: "voice.realtime_bidirectional.route_skipped",
+                fields: [
+                    "source": source,
+                    "reason": "missing_user_transcript"
+                ]
+            )
+            return false
+        }
+
+        let requestTiming = beginRequestTiming(source: "voice_realtime_transcript", text: trimmedTranscript)
+        activeRequestTiming = requestTiming
+        defer {
+            activeRequestTiming = nil
+            clearDeferredLiveAgentRoutePartial()
+        }
+
+        lastTranscript = trimmedTranscript
+        lastVoiceInteractionCompletedAt = Date()
+        speculativeStabilityDwellTask?.cancel()
+        speculativeStabilityDwellTask = nil
+        lastObservedPartial = nil
+        lastObservedPartialAt = nil
+
+        OpenClickyMessageLogStore.shared.append(
+            lane: "voice",
+            direction: "incoming",
+            event: "voice.transcript",
+            fields: [
+                "text": trimmedTranscript,
+                "source": source,
+                "inputPath": "realtime_input_audio_buffer",
+                "requestID": requestTiming.requestID
+            ]
+        )
+        ClickyAnalytics.trackUserMessageSent(transcript: trimmedTranscript)
+
+        let routed = routeFinalVoiceTranscriptActionIfNeeded(
+            trimmedTranscript,
+            source: "realtime_voice",
+            selectionSource: "voice_realtime_transcript",
+            directComputerUseSource: "realtime_transcript",
+            includeQuickLocalResponses: false
+        )
+        if routed {
+            OpenClickyMessageLogStore.shared.append(
+                lane: "voice",
+                direction: "internal",
+                event: "voice.realtime_bidirectional.app_route_handled",
+                fields: [
+                    "source": source,
+                    "requestID": requestTiming.requestID
+                ]
+            )
+        } else if Self.shouldAttachScreenContext(to: trimmedTranscript) {
+            OpenClickyMessageLogStore.shared.append(
+                lane: "voice",
+                direction: "internal",
+                event: "voice.realtime_bidirectional.visual_route_handled",
+                fields: [
+                    "source": source,
+                    "requestID": requestTiming.requestID,
+                    "screenContextNeeded": true,
+                    "executor": "voice.response",
+                    "executionMethod": "sendTranscriptToClaudeWithScreenshot"
+                ]
+            )
+            sendTranscriptToClaudeWithScreenshot(transcript: trimmedTranscript)
+            return true
+        } else {
+            markRequestCompleted(
+                route: "voice.realtime_response",
+                timing: requestTiming,
+                extra: [
+                    "executor": "openai_realtime",
+                    "executionMethod": "OpenAIRealtimeSpeechClient.finishBidirectionalVoiceTurn",
+                    "source": source
+                ]
+            )
+        }
+        return routed
+    }
+
+    private func routeFinalVoiceTranscriptActionIfNeeded(
+        _ transcript: String,
+        source: String,
+        selectionSource: String,
+        directComputerUseSource: String,
+        includeQuickLocalResponses: Bool
+    ) -> Bool {
+        if handleAgentCancellationRequestIfNeeded(from: transcript) {
+            return true
+        }
+        if handleAgentStatusQuestionIfNeeded(from: transcript) {
+            return true
+        }
+        if handleAgentSelectionRequestIfNeeded(from: transcript, source: selectionSource) {
+            return true
+        }
+        if acceptPendingAgentOfferIfConfirmed(from: transcript) {
+            return true
+        }
+        if submitPendingAgentVoiceFollowUp(transcript) {
+            return true
+        }
+        if startExplicitAgentTaskIfRequested(from: transcript) {
+            return true
+        }
+        if startAgentTaskFromDeferredLiveAgentRouteIfNeeded(transcript) {
+            return true
+        }
+        if handleDirectComputerUseRequest(from: transcript, source: directComputerUseSource) {
+            return true
+        }
+        if includeQuickLocalResponses, handleQuickLocalVoiceResponseIfNeeded(from: transcript) {
+            return true
+        }
+        if submitContextualAgentFollowUp(transcript, source: source) {
+            return true
+        }
+        if startImplicitAgentTaskIfNeeded(from: transcript) {
+            return true
+        }
+        return false
     }
 
     // MARK: - Companion Prompt
@@ -2808,6 +3007,25 @@ final class CompanionManager: ObservableObject {
             return true
         }
 
+        if let webOpenRequest = Self.webOpenRequest(from: transcript) {
+            OpenClickyMessageLogStore.shared.append(
+                lane: "computer-use",
+                direction: "incoming",
+                event: "native_cua.direct_request.web_detected",
+                fields: [
+                    "source": source,
+                    "transcript": transcript,
+                    "executor": "native_cua",
+                    "route": "native_cua.open_url",
+                    "executionMethod": "NSWorkspace.open",
+                    "url": webOpenRequest.url.absoluteString,
+                    "requestID": activeRequestTiming?.requestID ?? "none"
+                ]
+            )
+            openRequestedWebsite(webOpenRequest)
+            return true
+        }
+
         if let reminderAddRequest = Self.reminderAddRequest(from: transcript) {
             OpenClickyMessageLogStore.shared.append(
                 lane: "computer-use",
@@ -2942,6 +3160,50 @@ final class CompanionManager: ObservableObject {
         }
 
         return false
+    }
+
+    private func openRequestedWebsite(_ request: OpenClickyWebOpenRequest, shouldSpeak: Bool = true) {
+        let executionStartedAt = markRequestExecutionStarted(
+            route: "native_cua.open_url",
+            extra: [
+                "executor": "native_cua",
+                "executionMethod": "NSWorkspace.open",
+                "controller": "NSWorkspace",
+                "url": request.url.absoluteString,
+                "shouldSpeak": shouldSpeak
+            ]
+        )
+        NSWorkspace.shared.open(request.url)
+        latestVoiceResponseCard = ClickyResponseCard(
+            source: .voice,
+            rawText: "opening \(request.displayName).",
+            contextTitle: request.instruction
+        )
+        OpenClickyMessageLogStore.shared.append(
+            lane: "computer-use",
+            direction: "outgoing",
+            event: "native_cua.open_url",
+            fields: [
+                "executor": "native_cua",
+                "executionMethod": "NSWorkspace.open",
+                "controller": "NSWorkspace",
+                "url": request.url.absoluteString,
+                "instruction": request.instruction
+            ]
+        )
+        if shouldSpeak {
+            speakShortSystemResponse("opening \(request.displayName).")
+        }
+        markRequestCompleted(
+            route: "native_cua.open_url",
+            executionStartedAt: executionStartedAt,
+            extra: [
+                "executor": "native_cua",
+                "executionMethod": "NSWorkspace.open",
+                "controller": "NSWorkspace",
+                "url": request.url.absoluteString
+            ]
+        )
     }
 
     @discardableResult
@@ -6192,6 +6454,62 @@ final class CompanionManager: ObservableObject {
             .joined(separator: " ")
     }
 
+    private static func webOpenRequest(from transcript: String) -> OpenClickyWebOpenRequest? {
+        let trimmedTranscript = normalizedCommandCandidate(from: transcript)
+        guard !trimmedTranscript.isEmpty else { return nil }
+
+        let patterns = [
+            #"(?i)^\s*(?:(?:can|could|would|will)\s+you\s+)?(?:please\s+)?(?:open|go\s+to|visit|browse\s+to|navigate\s+to|pull\s+up|show)\s+(?:the\s+)?(.+?)(?:\s+(?:website|web\s+site|webpage|web\s+page|url|site))?(?:\s+for\s+me)?[\.\!\?]*\s*$"#,
+            #"(?i)^\s*(?:the\s+)?(.+?)\s+(?:website|web\s+site|webpage|web\s+page|url|site)[\.\!\?]*\s*$"#
+        ]
+
+        for pattern in patterns {
+            guard let regex = try? NSRegularExpression(pattern: pattern) else { continue }
+            let range = NSRange(trimmedTranscript.startIndex..<trimmedTranscript.endIndex, in: trimmedTranscript)
+            guard let match = regex.firstMatch(in: trimmedTranscript, range: range),
+                  let targetRange = Range(match.range(at: 1), in: trimmedTranscript) else {
+                continue
+            }
+
+            let rawTarget = String(trimmedTranscript[targetRange])
+                .trimmingCharacters(in: CharacterSet(charactersIn: " \n\t.,!?"))
+            guard let url = normalizedWebOpenURL(from: rawTarget) else { continue }
+            return OpenClickyWebOpenRequest(
+                url: url,
+                displayName: displayNameForWebOpenTarget(rawTarget, url: url),
+                instruction: trimmedTranscript
+            )
+        }
+
+        return nil
+    }
+
+    private static func normalizedWebOpenURL(from rawTarget: String) -> URL? {
+        let trimmed = rawTarget.trimmingCharacters(in: CharacterSet(charactersIn: " \n\t.,!?"))
+        guard !trimmed.isEmpty else { return nil }
+
+        let lowered = trimmed.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current).lowercased()
+        if lowered.hasPrefix("http://") || lowered.hasPrefix("https://") {
+            return URL(string: trimmed)
+        }
+        if lowered.hasPrefix("www.") {
+            return URL(string: "https://\(trimmed)")
+        }
+        if lowered.range(of: #"\b[a-z0-9-]+(?:\.[a-z0-9-]+)+\b"#, options: .regularExpression) != nil {
+            return URL(string: "https://\(lowered)")
+        }
+
+        return nil
+    }
+
+    private static func displayNameForWebOpenTarget(_ rawTarget: String, url: URL) -> String {
+        let cleaned = rawTarget.trimmingCharacters(in: CharacterSet(charactersIn: " \n\t.,!?"))
+        if !cleaned.isEmpty {
+            return cleaned
+        }
+        return url.host ?? url.absoluteString
+    }
+
     private static func localAppOpenRequest(from transcript: String) -> OpenClickyAppOpenRequest? {
         let trimmedTranscript = normalizedCommandCandidate(from: transcript)
         guard !trimmedTranscript.isEmpty else { return nil }
@@ -6718,6 +7036,7 @@ final class CompanionManager: ObservableObject {
             || nativeKeyPressRequest(from: transcript) != nil
             || localAppOpenRequest(from: transcript) != nil
             || localFolderOpenRequest(from: transcript) != nil
+            || webOpenRequest(from: transcript) != nil
             || isIncompleteLocalAppOpenRequest(from: transcript)
     }
 
@@ -8833,7 +9152,7 @@ final class CompanionManager: ObservableObject {
     - perform any filesystem, git, build, install, or refactor work
     - take any local action beyond pointing at things on screen
 
-    if the user asks you to do anything in the "DO NOT" list and OpenClicky has not already routed it before you see the turn, do not ask them to repeat it with a special agent phrase. respond with a short handoff such as "i’ll take care of that in the background." then stop. OpenClicky should route clear file, code, log, settings, current-research, and other tool-heavy work to Agent Mode automatically.
+    if the user asks you to do anything in the "DO NOT" list and OpenClicky has not already routed it before you see the turn, be honest that no action has started. do not say "i’ll take care of that in the background", "on it", or "starting an agent" unless the app has actually routed the turn to Agent Mode or direct computer-use before it reaches you. say briefly: "that needs OpenClicky's agent route, but it didn't start from this voice turn." OpenClicky should route clear file, code, log, settings, current-research, and other tool-heavy work to Agent Mode automatically.
 
     when the user clearly mentions "agent" / "start an agent" / "spin up an agent" / "ask an agent", or when the app has already decided the task needs Agent Mode, your job is just to confirm briefly: "on it, starting an agent for that."
 
@@ -9048,7 +9367,16 @@ final class CompanionManager: ObservableObject {
                     userPromptForClaude = transcript
                 }
 
-                if OpenClickyModelCatalog.isSpeechModelID(self.selectedModel) {
+                let isRealtimeResponseModel = OpenClickyModelCatalog.isSpeechModelID(self.selectedModel)
+                let visualAnalysisModelID = isRealtimeResponseModel && shouldAttachScreenContext
+                    ? OpenClickyModelCatalog.defaultVoiceResponseModelID
+                    : self.selectedModel
+
+                // Realtime speech turns are audio-first. They do not currently
+                // carry OpenClicky's screenshot payload into the response model,
+                // so visual requests must continue through the screenshot-aware
+                // voice path below. The playback engine can still be Realtime.
+                if isRealtimeResponseModel && !shouldAttachScreenContext {
                     let realtimeStartedAt = Date()
                     var didMarkRealtimeAudioStarted = false
                     let realtimeText = try await self.openAIRealtimeSpeechClient.speakResponse(
@@ -9140,7 +9468,7 @@ final class CompanionManager: ObservableObject {
                 let shouldUseFiller = Self.shouldUsePreResponseFiller(
                     transcript: transcript,
                     screenContextNeeded: shouldAttachScreenContext,
-                    modelProvider: OpenClickyModelCatalog.voiceResponseModel(withID: selectedModel).provider
+                    modelProvider: OpenClickyModelCatalog.voiceResponseModel(withID: visualAnalysisModelID).provider
                 )
                 let chosenFiller = shouldUseFiller ? FillerPhraseLibrary.shared.randomFiller() : nil
                 let voiceSystemPrompt: String = {
@@ -9158,6 +9486,10 @@ final class CompanionManager: ObservableObject {
 
                 let modelStartedAt = Date()
                 var modelResponseFields = self.voiceResponseExecutionFields()
+                if visualAnalysisModelID != self.selectedModel {
+                    modelResponseFields["visualAnalysisModel"] = visualAnalysisModelID
+                    modelResponseFields["realtimeVisualPathOverride"] = true
+                }
                 let ttsStartedAt = Date()
                 var didMarkAudioStarted = false
 
@@ -9231,6 +9563,7 @@ final class CompanionManager: ObservableObject {
                 }
                 let continuationText = try await analyzeVoiceResponse(
                     images: labeledImages,
+                    modelID: visualAnalysisModelID,
                     systemPrompt: voiceSystemPrompt,
                     conversationHistory: historyForAPI,
                     userPrompt: userPromptForClaude,
@@ -9722,13 +10055,14 @@ final class CompanionManager: ObservableObject {
 
     private func analyzeVoiceResponse(
         images: [(data: Data, label: String)],
+        modelID: String? = nil,
         systemPrompt: String,
         conversationHistory: [(userPlaceholder: String, assistantResponse: String)] = [],
         userPrompt: String,
         assistantPrefill: String? = nil,
         onTextChunk: @MainActor @Sendable @escaping (String) -> Void
     ) async throws -> String {
-        let selectedVoiceResponseModel = OpenClickyModelCatalog.voiceResponseModel(withID: selectedModel)
+        let selectedVoiceResponseModel = OpenClickyModelCatalog.voiceResponseModel(withID: modelID ?? selectedModel)
         applyVoiceResponseModelSettings(selectedVoiceResponseModel)
 
         switch selectedVoiceResponseModel.provider {
