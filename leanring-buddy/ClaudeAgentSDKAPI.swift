@@ -35,6 +35,8 @@ final class ClaudeAgentSDKAPI {
     You are OpenClicky's persistent local Claude Agent SDK voice response session.
     Keep the session warm and follow the current OpenClicky voice policy and context supplied with each user turn.
     Answer like a capable coworker over the user's shoulder: one or two natural spoken sentences by default, no bullets, markdown, headings, tables, or code blocks unless explicitly requested.
+
+    \(ThreeDGenerationDispatcher.systemPromptInstruction)
     """
 
     private var bridgeProcess: Process?

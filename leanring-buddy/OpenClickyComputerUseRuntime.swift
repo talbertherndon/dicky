@@ -99,6 +99,12 @@ final class OpenClickyNativeComputerUseController: ObservableObject {
         try OpenClickyComputerUseKeyboardInput.typeCharacters(text, delayMilliseconds: delayMilliseconds, toPid: pid)
     }
 
+    func click(at point: CGPoint) throws {
+        guard isEnabled else { throw OpenClickyComputerUseError.disabled }
+        OpenClickyApplicationUsageLogStore.shared.recordFrontmostApplication(source: "native_cua_click")
+        try OpenClickyComputerUseMouseInput.leftClick(at: point)
+    }
+
     private static func makeStatus(
         enabled: Bool,
         focusedWindow: OpenClickyComputerUseWindowInfo? = nil,
@@ -979,6 +985,44 @@ enum OpenClickyComputerUseKeyboardInput {
         "0": 0x1D, "1": 0x12, "2": 0x13, "3": 0x14, "4": 0x15,
         "5": 0x17, "6": 0x16, "7": 0x1A, "8": 0x1C, "9": 0x19
     ]
+}
+
+enum OpenClickyComputerUseMouseInput {
+    static func leftClick(at point: CGPoint) throws {
+        let quartzPoint = quartzPoint(fromAppKitPoint: point)
+        try postMouseEvent(type: .mouseMoved, at: quartzPoint)
+        try postMouseEvent(type: .leftMouseDown, at: quartzPoint)
+        usleep(35_000)
+        try postMouseEvent(type: .leftMouseUp, at: quartzPoint)
+    }
+
+    private static func quartzPoint(fromAppKitPoint point: CGPoint) -> CGPoint {
+        guard let screen = NSScreen.screens.first(where: { $0.frame.contains(point) }),
+              let displayID = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID else {
+            return point
+        }
+
+        let appKitFrame = screen.frame
+        let quartzFrame = CGDisplayBounds(displayID)
+        let localX = point.x - appKitFrame.origin.x
+        let localYFromTop = appKitFrame.maxY - point.y
+        return CGPoint(
+            x: quartzFrame.origin.x + localX,
+            y: quartzFrame.origin.y + localYFromTop
+        )
+    }
+
+    private static func postMouseEvent(type: CGEventType, at point: CGPoint) throws {
+        guard let event = CGEvent(
+            mouseEventSource: nil,
+            mouseType: type,
+            mouseCursorPosition: point,
+            mouseButton: .left
+        ) else {
+            throw OpenClickyComputerUseError.eventCreationFailed("mouse \(type.rawValue) at \(Int(point.x)),\(Int(point.y))")
+        }
+        event.post(tap: .cghidEventTap)
+    }
 }
 
 enum OpenClickySkyLightEventPost {

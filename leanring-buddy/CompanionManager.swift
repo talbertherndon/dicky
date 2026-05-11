@@ -95,6 +95,12 @@ private struct OpenClickyNativeKeyPressRequest {
     let targetDescription: String
 }
 
+private struct OpenClickyNativeClickRequest {
+    let targetDescription: String
+    let targetPhrase: String?
+    let prefersLastPointedElement: Bool
+}
+
 private struct OpenClickyFolderOpenRequest {
     let url: URL
     let displayName: String
@@ -225,6 +231,10 @@ final class CompanionManager: ObservableObject {
             cursorOverlayState.detectedElementReturnsImmediately = detectedElementReturnsImmediately
         }
     }
+    private var lastPointedElementScreenLocation: CGPoint?
+    private var lastPointedElementDisplayFrame: CGRect?
+    private var lastPointedElementLabel: String?
+    private var lastPointedElementAt: Date?
 
     // MARK: - Onboarding Video State (shared across all screen overlays)
 
@@ -548,6 +558,25 @@ final class CompanionManager: ObservableObject {
         let trimmedUserTranscript = userTranscript.trimmingCharacters(in: .whitespacesAndNewlines)
         let trimmedAssistantResponse = assistantResponse.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedUserTranscript.isEmpty, !trimmedAssistantResponse.isEmpty else { return }
+
+        // 3D generation: scan both sides of the exchange for `/3d <prompt>` or
+        // `[OPENCLICKY_3D] prompt: "…"` markers. Matches dispatch a generation
+        // job (ThreeDGenerationService) and the floating viewer auto-opens.
+        let scanned = ThreeDGenerationDispatcher.scanAndDispatch(trimmedUserTranscript)
+            + ThreeDGenerationDispatcher.scanAndDispatch(trimmedAssistantResponse)
+        if !scanned.isEmpty {
+            OpenClickyMessageLogStore.shared.append(
+                lane: "voice",
+                direction: "internal",
+                event: "three_d.dispatcher.matched",
+                fields: [
+                    "reason": reason,
+                    "matchCount": scanned.count,
+                    "firstPrompt": scanned.first?.prompt ?? "",
+                    "firstStyle": scanned.first?.style.rawValue ?? ""
+                ]
+            )
+        }
 
         conversationHistory.append((
             userTranscript: trimmedUserTranscript,
@@ -1488,6 +1517,13 @@ final class CompanionManager: ObservableObject {
         detectedElementReturnsImmediately = false
     }
 
+    private func rememberPointedElement(at point: CGPoint, displayFrame: CGRect?, label: String?) {
+        lastPointedElementScreenLocation = point
+        lastPointedElementDisplayFrame = displayFrame
+        lastPointedElementLabel = label
+        lastPointedElementAt = Date()
+    }
+
     private func startExternalControlBridgeIfNeeded() {
         guard externalControlBridgeServer == nil else { return }
         let server = OpenClickyExternalControlBridgeServer { [weak self] command in
@@ -1964,9 +2000,17 @@ final class CompanionManager: ObservableObject {
             .receive(on: DispatchQueue.main)
             .sink { [weak self] isKeyboardRecording, isMicrophoneButtonRecording, isFinalizing, isPreparing in
                 guard let self else { return }
-                // Don't override .responding — the AI response pipeline
-                // manages that state directly until streaming finishes.
-                guard self.voiceState != .responding else { return }
+                // Don't let an old speaking state mask a real microphone
+                // capture. Push-to-talk can interrupt speech and immediately
+                // start listening; in that case the cursor must switch to the
+                // waveform instead of staying in the response indicator.
+                if self.voiceState == .responding,
+                   !isKeyboardRecording,
+                   !isMicrophoneButtonRecording,
+                   !isFinalizing,
+                   !isPreparing {
+                    return
+                }
 
                 if isFinalizing {
                     self.voiceState = .processing
@@ -2624,7 +2668,7 @@ final class CompanionManager: ObservableObject {
                 let selectedVoiceResponseModel = OpenClickyModelCatalog.voiceResponseModel(withID: self.selectedModel)
                 if selectedVoiceResponseModel.provider == .deepgram {
                     try await self.deepgramVoiceAgentClient.beginBidirectionalVoiceTurn(
-                        systemPrompt: self.currentVoiceResponseSystemPrompt(),
+                        systemPrompt: self.currentRealtimeVoiceSystemPrompt(),
                         conversationHistory: historyForAPI,
                         onUserTranscript: onUserTranscript,
                         onAssistantTextChunk: onAssistantTextChunk,
@@ -2632,7 +2676,7 @@ final class CompanionManager: ObservableObject {
                     )
                 } else {
                     try await self.openAIRealtimeSpeechClient.beginBidirectionalVoiceTurn(
-                        systemPrompt: self.currentVoiceResponseSystemPrompt(),
+                        systemPrompt: self.currentRealtimeVoiceSystemPrompt(),
                         conversationHistory: historyForAPI,
                         onUserTranscript: onUserTranscript,
                         onAssistantTextChunk: onAssistantTextChunk,
@@ -3311,6 +3355,26 @@ final class CompanionManager: ObservableObject {
             return true
         }
 
+        if let clickRequest = Self.nativeClickRequest(from: transcript) {
+            OpenClickyMessageLogStore.shared.append(
+                lane: "computer-use",
+                direction: "incoming",
+                event: "native_cua.direct_request.click_detected",
+                fields: [
+                    "source": source,
+                    "transcript": transcript,
+                    "executor": "native_cua",
+                    "route": "native_cua.click",
+                    "executionMethod": "OpenClickyNativeComputerUseController.click",
+                    "targetPhrase": clickRequest.targetPhrase ?? "",
+                    "prefersLastPointedElement": clickRequest.prefersLastPointedElement,
+                    "requestID": activeRequestTiming?.requestID ?? "none"
+                ]
+            )
+            clickUsingNativeComputerUse(clickRequest)
+            return true
+        }
+
         if let typeRequest = Self.nativeTypeRequest(from: transcript) {
             let backend = selectedComputerUseBackend
             OpenClickyMessageLogStore.shared.append(
@@ -3805,6 +3869,201 @@ final class CompanionManager: ObservableObject {
             pressKeyUsingBackgroundComputerUse(request, shouldSpeak: shouldSpeak)
         case .nativeSwift:
             pressKeyUsingNativeComputerUse(request, shouldSpeak: shouldSpeak)
+        }
+    }
+
+    private func clickUsingNativeComputerUse(_ request: OpenClickyNativeClickRequest) {
+        interruptCurrentVoiceResponse()
+        let timing = activeRequestTiming
+        let executionStartedAt = markRequestExecutionStarted(
+            route: "native_cua.click",
+            timing: timing,
+            extra: [
+                "executor": "native_cua",
+                "executionMethod": "OpenClickyNativeComputerUseController.click",
+                "controller": "OpenClickyNativeComputerUseController",
+                "targetPhrase": request.targetPhrase ?? "",
+                "prefersLastPointedElement": request.prefersLastPointedElement
+            ]
+        )
+
+        if !nativeComputerUseController.isEnabled {
+            nativeComputerUseController.setEnabled(true)
+        }
+
+        if request.prefersLastPointedElement,
+           let point = lastPointedElementScreenLocation,
+           let pointedAt = lastPointedElementAt,
+           Date().timeIntervalSince(pointedAt) <= 120 {
+            performNativeClick(
+                at: point,
+                displayFrame: lastPointedElementDisplayFrame,
+                label: lastPointedElementLabel,
+                request: request,
+                executionStartedAt: executionStartedAt,
+                timing: timing
+            )
+            return
+        }
+
+        Task { @MainActor in
+            do {
+                let screenCaptures = try await captureAllScreensForVoiceResponseIfAvailable()
+                let liveMouseLocation = NSEvent.mouseLocation
+                let targetScreenCapture = screenCaptures.first { $0.displayFrame.contains(liveMouseLocation) }
+                    ?? screenCaptures.first(where: { $0.isCursorScreen })
+                    ?? screenCaptures.first
+
+                guard let targetScreenCapture else {
+                    throw NSError(
+                        domain: "OpenClickyNativeClick",
+                        code: -1,
+                        userInfo: [NSLocalizedDescriptionKey: "No screen capture available"]
+                    )
+                }
+
+                let dimensionInfo = " (image dimensions: \(targetScreenCapture.screenshotWidthInPixels)x\(targetScreenCapture.screenshotHeightInPixels) pixels)"
+                let response = try await analyzeComputerUsePointingResponse(
+                    image: (data: targetScreenCapture.imageData, label: targetScreenCapture.label + dimensionInfo),
+                    capture: targetScreenCapture,
+                    systemPrompt: Self.nativeClickPointingSystemPrompt,
+                    userPrompt: request.targetDescription,
+                    onTextChunk: { _ in }
+                )
+                let parseResult = Self.parsePointingCoordinates(from: response)
+                guard let pointCoordinate = parseResult.coordinate else {
+                    speakShortSystemResponse("i couldn't find that to click.")
+                    markRequestCompleted(
+                        route: "native_cua.click",
+                        executionStartedAt: executionStartedAt,
+                        timing: timing,
+                        status: "failed",
+                        extra: [
+                            "executor": "native_cua",
+                            "executionMethod": "analyzeComputerUsePointingResponse",
+                            "controller": "OpenClickyNativeComputerUseController",
+                            "targetPhrase": request.targetPhrase ?? "",
+                            "error": "No click coordinate"
+                        ]
+                    )
+                    return
+                }
+
+                let globalLocation = globalPoint(fromScreenshotPoint: pointCoordinate, in: targetScreenCapture)
+                performNativeClick(
+                    at: globalLocation,
+                    displayFrame: targetScreenCapture.displayFrame,
+                    label: parseResult.elementLabel ?? request.targetPhrase,
+                    request: request,
+                    executionStartedAt: executionStartedAt,
+                    timing: timing
+                )
+            } catch {
+                OpenClickyMessageLogStore.shared.append(
+                    lane: "computer-use",
+                    direction: "error",
+                    event: "native_cua.click_error",
+                    fields: [
+                        "executor": "native_cua",
+                        "executionMethod": "OpenClickyNativeComputerUseController.click",
+                        "controller": "OpenClickyNativeComputerUseController",
+                        "targetPhrase": request.targetPhrase ?? "",
+                        "error": error.localizedDescription
+                    ]
+                )
+                speakShortSystemResponse("clicking hit a blocker: \(error.localizedDescription)")
+                markRequestCompleted(
+                    route: "native_cua.click",
+                    executionStartedAt: executionStartedAt,
+                    timing: timing,
+                    status: "failed",
+                    extra: [
+                        "executor": "native_cua",
+                        "executionMethod": "OpenClickyNativeComputerUseController.click",
+                        "controller": "OpenClickyNativeComputerUseController",
+                        "targetPhrase": request.targetPhrase ?? "",
+                        "error": error.localizedDescription
+                    ]
+                )
+            }
+        }
+    }
+
+    private func performNativeClick(
+        at point: CGPoint,
+        displayFrame: CGRect?,
+        label: String?,
+        request: OpenClickyNativeClickRequest,
+        executionStartedAt: Date,
+        timing: OpenClickyRequestTiming?
+    ) {
+        do {
+            try nativeComputerUseController.click(at: point)
+            detectedElementScreenLocation = point
+            detectedElementDisplayFrame = displayFrame
+            detectedElementBubbleText = Self.pointingBubbleText(for: label)
+            rememberPointedElement(at: point, displayFrame: displayFrame, label: label)
+            latestVoiceResponseCard = ClickyResponseCard(
+                source: .voice,
+                rawText: "clicked \(label ?? request.targetPhrase ?? "that").",
+                contextTitle: request.targetDescription
+            )
+            OpenClickyMessageLogStore.shared.append(
+                lane: "computer-use",
+                direction: "outgoing",
+                event: "native_cua.click",
+                fields: [
+                    "executor": "native_cua",
+                    "executionMethod": "OpenClickyNativeComputerUseController.click",
+                    "controller": "OpenClickyNativeComputerUseController",
+                    "targetPhrase": request.targetPhrase ?? "",
+                    "label": label ?? "",
+                    "x": Int(point.x),
+                    "y": Int(point.y)
+                ]
+            )
+            speakShortSystemResponse("clicked \(label ?? request.targetPhrase ?? "that").")
+            markRequestCompleted(
+                route: "native_cua.click",
+                executionStartedAt: executionStartedAt,
+                timing: timing,
+                extra: [
+                    "executor": "native_cua",
+                    "executionMethod": "OpenClickyNativeComputerUseController.click",
+                    "controller": "OpenClickyNativeComputerUseController",
+                    "targetPhrase": request.targetPhrase ?? "",
+                    "label": label ?? "",
+                    "x": Int(point.x),
+                    "y": Int(point.y)
+                ]
+            )
+        } catch {
+            OpenClickyMessageLogStore.shared.append(
+                lane: "computer-use",
+                direction: "error",
+                event: "native_cua.click_error",
+                fields: [
+                    "executor": "native_cua",
+                    "executionMethod": "OpenClickyNativeComputerUseController.click",
+                    "controller": "OpenClickyNativeComputerUseController",
+                    "targetPhrase": request.targetPhrase ?? "",
+                    "error": error.localizedDescription
+                ]
+            )
+            speakShortSystemResponse("native clicking hit a blocker: \(error.localizedDescription)")
+            markRequestCompleted(
+                route: "native_cua.click",
+                executionStartedAt: executionStartedAt,
+                timing: timing,
+                status: "failed",
+                extra: [
+                    "executor": "native_cua",
+                    "executionMethod": "OpenClickyNativeComputerUseController.click",
+                    "controller": "OpenClickyNativeComputerUseController",
+                    "targetPhrase": request.targetPhrase ?? "",
+                    "error": error.localizedDescription
+                ]
+            )
         }
     }
 
@@ -5755,6 +6014,11 @@ final class CompanionManager: ObservableObject {
                 return true
             }
 
+            if let clickRequest = Self.nativeClickRequest(from: taskCreationInstruction) {
+                clickUsingNativeComputerUse(clickRequest)
+                return true
+            }
+
             if let folderRequest = folderOpenRequest(from: taskCreationInstruction),
                Self.shouldInlineDirectFolderOpenFromAgentInstruction(taskCreationInstruction) {
                 openRequestedFolder(folderRequest)
@@ -5823,6 +6087,11 @@ final class CompanionManager: ObservableObject {
 
         if let keyPressRequest = Self.nativeKeyPressRequest(from: instruction) {
             pressKeyUsingSelectedComputerUse(keyPressRequest)
+            return true
+        }
+
+        if let clickRequest = Self.nativeClickRequest(from: instruction) {
+            clickUsingNativeComputerUse(clickRequest)
             return true
         }
 
@@ -7511,6 +7780,7 @@ final class CompanionManager: ObservableObject {
     private static func isLikelyDirectLocalOnlyRequest(_ transcript: String) -> Bool {
         nativeTypeRequest(from: transcript) != nil
             || nativeKeyPressRequest(from: transcript) != nil
+            || nativeClickRequest(from: transcript) != nil
             || localAppOpenRequest(from: transcript) != nil
             || localFolderOpenRequest(from: transcript) != nil
             || webOpenRequest(from: transcript) != nil
@@ -7611,6 +7881,9 @@ final class CompanionManager: ObservableObject {
             "press",
             "hit",
             "tap",
+            "click",
+            "select",
+            "choose",
             "type",
             "write",
             "enter",
@@ -7875,8 +8148,10 @@ final class CompanionManager: ObservableObject {
 
         let patterns = [
             #"(?i)^\s*(?:(?:can|could|would|will)\s+you\s+)?(?:please\s+)?(?:type|write|enter|input)\s+(?:into|in)\s+(?:the\s+)?(?:focused\s+)?(?:window|app|field|text\s+field)\s+(.+?)[\.\!\?]*\s*$"#,
+            #"(?i)^\s*(?:(?:can|could|would|will)\s+you\s+)?(?:please\s+)?(?:type|write|enter|input)\s+(.+?)\s+(?:into|in)\s+(?:the\s+)?(?:[a-z0-9\s-]+?\s+)?(?:input|pin|code|box|search|field|text\s+field|browser|page|window|app)[\.\!\?]*\s*$"#,
             #"(?i)^\s*(?:(?:can|could|would|will)\s+you\s+)?(?:please\s+)?(?:type|write|enter|input)\s+(.+?)(?:\s+(?:into|in)\s+(?:the\s+)?(?:focused\s+)?(?:window|app|field|text\s+field))?[\.\!\?]*\s*$"#,
             #"(?i)^\s*(?:(?:can|could|would|will)\s+you\s+)?(?:please\s+)?paste\s+(?:into|in)\s+(?:the\s+)?(?:focused\s+)?(?:window|app|field|text\s+field)\s+(.+?)[\.\!\?]*\s*$"#,
+            #"(?i)^\s*(?:(?:can|could|would|will)\s+you\s+)?(?:please\s+)?paste\s+(.+?)\s+(?:into|in)\s+(?:the\s+)?(?:[a-z0-9\s-]+?\s+)?(?:input|pin|code|box|search|field|text\s+field|browser|page|window|app)[\.\!\?]*\s*$"#,
             #"(?i)^\s*(?:(?:can|could|would|will)\s+you\s+)?(?:please\s+)?paste\s+(.+?)(?:\s+(?:into|in)\s+(?:the\s+)?(?:focused\s+)?(?:window|app|field|text\s+field))?[\.\!\?]*\s*$"#
         ]
 
@@ -7896,6 +8171,75 @@ final class CompanionManager: ObservableObject {
             return OpenClickyNativeTypeRequest(
                 text: text,
                 targetDescription: candidate
+            )
+        }
+
+        return nil
+    }
+
+    private static func nativeClickRequest(from transcript: String) -> OpenClickyNativeClickRequest? {
+        let candidate = normalizedCommandCandidate(from: transcript)
+        guard !candidate.isEmpty else { return nil }
+
+        let normalized = normalizedSpokenCommandText(candidate)
+        let referentialTargets: Set<String> = [
+            "it",
+            "that",
+            "this",
+            "that one",
+            "this one",
+            "the thing",
+            "the button",
+            "the link",
+            "the tile"
+        ]
+
+        let patterns = [
+            #"(?i)^\s*(?:(?:can|could|would|will)\s+you\s+)?(?:please\s+)?(?:click|tap|select|choose)\s+(?:on\s+)?(.+?)[\.\!\?]*\s*$"#,
+            #"(?i)^\s*(?:(?:can|could|would|will)\s+you\s+)?(?:please\s+)?(?:open|play)\s+(?:the\s+)?(.+?)\s+(?:tile|button|link|item|profile|show|movie|episode)[\.\!\?]*\s*$"#
+        ]
+
+        for pattern in patterns {
+            guard let regex = try? NSRegularExpression(pattern: pattern) else { continue }
+            let range = NSRange(candidate.startIndex..<candidate.endIndex, in: candidate)
+            guard let match = regex.firstMatch(in: candidate, range: range),
+                  let targetRange = Range(match.range(at: 1), in: candidate) else { continue }
+            let target = String(candidate[targetRange])
+                .trimmingCharacters(in: CharacterSet(charactersIn: " \n\t.,:;!?"))
+            let targetNormalized = normalizedSpokenCommandText(target)
+            let isTapKeyCommand = normalized.hasPrefix("tap ")
+                && [
+                    "escape", "esc", "enter", "return", "tab", "space", "spacebar",
+                    "delete", "backspace", "left", "right", "up", "down",
+                    "left arrow", "right arrow", "up arrow", "down arrow"
+                ].contains(targetNormalized)
+            if isTapKeyCommand { return nil }
+            guard !target.isEmpty,
+                  !["something", "somewhere", "anything"].contains(targetNormalized) else { return nil }
+
+            return OpenClickyNativeClickRequest(
+                targetDescription: candidate,
+                targetPhrase: referentialTargets.contains(targetNormalized) ? nil : target,
+                prefersLastPointedElement: referentialTargets.contains(targetNormalized)
+            )
+        }
+
+        if [
+            "can you click it",
+            "could you click it",
+            "click it",
+            "tap it",
+            "select it",
+            "choose it",
+            "click that",
+            "tap that",
+            "select that",
+            "choose that"
+        ].contains(normalized) {
+            return OpenClickyNativeClickRequest(
+                targetDescription: candidate,
+                targetPhrase: nil,
+                prefersLastPointedElement: true
             )
         }
 
@@ -8871,7 +9215,7 @@ final class CompanionManager: ObservableObject {
     @MainActor
     private func waitForVoicePlaybackToIdle(maxWaitSeconds: TimeInterval = 8.0) async {
         let start = Date()
-        while voiceTTSClient.isPlaying {
+        while voiceTTSClient.isPlaying || openAIRealtimeSpeechClient.isPlaying || deepgramVoiceAgentClient.isPlaying {
             if Task.isCancelled { return }
             if Date().timeIntervalSince(start) >= maxWaitSeconds { return }
             try? await Task.sleep(nanoseconds: 50_000_000)
@@ -8909,7 +9253,7 @@ final class CompanionManager: ObservableObject {
 
     @MainActor
     private var systemAnnouncementAudioWouldCollideWithVoiceInput: Bool {
-        if voiceTTSClient.isPlaying { return true }
+        if voiceTTSClient.isPlaying || openAIRealtimeSpeechClient.isPlaying || deepgramVoiceAgentClient.isPlaying { return true }
         if buddyDictationManager.isDictationInProgress { return true }
         if isRealtimeBidirectionalVoiceCaptureActive { return true }
         switch voiceState {
@@ -9459,10 +9803,18 @@ final class CompanionManager: ObservableObject {
         currentVoiceResponseCompletionToken = nil
         currentResponseTask?.cancel()
         currentResponseTask = nil
+        realtimeBidirectionalVoiceTask?.cancel()
+        realtimeBidirectionalVoiceTask = nil
+        isRealtimeBidirectionalVoiceCaptureActive = false
         codexVoiceSession.cancelActiveTurn(reason: "voice_response_interrupted")
+        openAIRealtimeSpeechClient.stopPlayback()
         deepgramVoiceAgentClient.stopPlayback()
         voiceTTSClient.stopPlayback()
         clearVoiceResponseCaption()
+        if !buddyDictationManager.isDictationInProgress {
+            currentAudioPowerLevel = 0
+            voiceState = .idle
+        }
     }
 
     private func prepareAgentScreenContextForNextTurn(minimumPasteboardChangeCount: Int) async -> CodexAgentScreenContext? {
@@ -9962,6 +10314,38 @@ final class CompanionManager: ObservableObject {
     - element is on screen 2 (not where cursor is): "that's over on your other monitor — see the terminal window? [POINT:400,300:terminal:screen2]"
     """
 
+    private static let companionRealtimeVoiceSystemPrompt = """
+    you're clicky, a friendly always-on companion that lives in the user's menu bar. the user just spoke to you through OpenClicky's realtime voice path. your reply is spoken directly as audio, so write only the natural words the user should hear. this is an ongoing conversation — you remember everything they've said before.
+
+    YOUR JOB IS NARROW. you only do these things:
+    1. GIVE ADVICE, EXPLAIN, and ANSWER QUESTIONS conversationally — including conceptual coding questions, walkthroughs, "what does this mean", "how would i", etc.
+    2. SEARCH THE WEB conversationally when the user asks. answer from your own general knowledge; if the user explicitly wants live/current data (today's weather, latest price, breaking news), give a brief handoff-style acknowledgement; OpenClicky routes that kind of task to Agent Mode.
+    3. ROUTE WORK NATURALLY — simple conversational help stays in voice, direct computer-control is handled by OpenClicky's computer-use path, and file/code/research/settings/log work is handed to Agent Mode without making the user say a special agent phrase.
+
+    YOU DO NOT, EVER:
+    - run code, run commands, run shell, run terminal, run python, run scripts
+    - read, write, edit, create, move, delete, rename, organize, or inspect files or folders on disk
+    - modify settings, config, memory, skills, logs, soul.md, or any OpenClicky state
+    - perform any filesystem, git, build, install, or refactor work
+    - include any control tags, point tags, coordinate tags, markdown, brackets, or hidden routing markers in your answer
+
+    if the user asks you to do anything in the "DO NOT" list and OpenClicky has not already routed it before you see the turn, be honest that no action has started. do not say "i’ll take care of that in the background", "on it", or "starting an agent" unless the app has actually routed the turn to Agent Mode or direct computer-use before it reaches you. say briefly: "that needs OpenClicky's agent route, but it didn't start from this voice turn." OpenClicky should route clear file, code, log, settings, current-research, and other tool-heavy work to Agent Mode automatically.
+
+    when the user clearly mentions "agent" / "start an agent" / "spin up an agent" / "ask an agent", or when the app has already decided the task needs Agent Mode, your job is just to confirm briefly: "on it, starting an agent for that."
+
+    response style:
+    - default to one or two sentences. be direct and dense. sound like a capable coworker over the user's shoulder, not a formal report. if the user asks you to explain more or go deeper, give a thorough explanation with no length cap — but still no file edits, no commands, just words.
+    - all lowercase, casual, warm. no emojis.
+    - write for the ear, not the eye. short sentences. no lists, bullets, markdown, headings, tables, or code blocks.
+    - don't use abbreviations or symbols that sound weird read aloud. write "for example" not "e.g.", spell out small numbers.
+    - never say "simply" or "just".
+    - don't read out code verbatim. describe what code does conversationally.
+    - don't end with dead-end yes/no questions ("want me to explain more?"). when it fits, plant a seed — mention something bigger or related they could try.
+
+    realtime output rule:
+    because this path speaks audio directly, never say or output OpenClicky's internal point-control syntax. do not say "point none", "point control", "open bracket point", coordinates, or anything resembling [POINT:none]. if a visual target would help, describe it naturally in words instead.
+    """
+
     private func runtimeStorageContextForVoicePrompt() -> String {
         let logs = OpenClickyMessageLogStore.shared
         return """
@@ -9987,6 +10371,21 @@ final class CompanionManager: ObservableObject {
         let memoryContext = codexHomeManager.persistentMemoryContext()
         return """
         \(Self.companionVoiceResponseSystemPrompt)
+
+        \(runtimeStorageContextForVoicePrompt())
+
+        persistent memory:
+        read this as durable user/project context. do not say you cannot remember outside the conversation; use this memory.
+
+        \(memoryContext)
+        """
+    }
+
+
+    private func currentRealtimeVoiceSystemPrompt() -> String {
+        let memoryContext = codexHomeManager.persistentMemoryContext()
+        return """
+        \(Self.companionRealtimeVoiceSystemPrompt)
 
         \(runtimeStorageContextForVoicePrompt())
 
@@ -10156,7 +10555,7 @@ final class CompanionManager: ObservableObject {
                     let realtimeStartedAt = Date()
                     var didMarkRealtimeAudioStarted = false
                     let realtimeText = try await self.openAIRealtimeSpeechClient.speakResponse(
-                        systemPrompt: currentVoiceResponseSystemPrompt(),
+                        systemPrompt: currentRealtimeVoiceSystemPrompt(),
                         conversationHistory: historyForAPI,
                         userPrompt: userPromptForClaude,
                         onTextChunk: { accumulatedText in
@@ -10495,6 +10894,11 @@ final class CompanionManager: ObservableObject {
                     detectedElementScreenLocation = globalLocation
                     detectedElementDisplayFrame = displayFrame
                     detectedElementBubbleText = Self.pointingBubbleText(for: parseResult.elementLabel)
+                    rememberPointedElement(
+                        at: globalLocation,
+                        displayFrame: displayFrame,
+                        label: parseResult.elementLabel
+                    )
                     ClickyAnalytics.trackElementPointed(elementLabel: parseResult.elementLabel)
                     print("🎯 Element pointing: (\(Int(pointCoordinate.x)), \(Int(pointCoordinate.y))) → \"\(parseResult.elementLabel ?? "element")\"")
                 } else {
@@ -10755,6 +11159,11 @@ final class CompanionManager: ObservableObject {
                 detectedElementScreenLocation = globalLocation
                 detectedElementDisplayFrame = targetScreenCapture.displayFrame
                 detectedElementBubbleText = Self.pointingBubbleText(for: parseResult.elementLabel)
+                rememberPointedElement(
+                    at: globalLocation,
+                    displayFrame: targetScreenCapture.displayFrame,
+                    label: parseResult.elementLabel
+                )
                 ClickyAnalytics.trackElementPointed(elementLabel: parseResult.elementLabel)
                 print("Tutor pointing: (\(Int(pointCoordinate.x)), \(Int(pointCoordinate.y)))")
             }
@@ -11154,6 +11563,12 @@ final class CompanionManager: ObservableObject {
         }
     }
 
+    private static let nativeClickPointingSystemPrompt = """
+    You are OpenClicky's visual click target resolver. The user wants OpenClicky to actually click in the visible app, not merely point or explain.
+
+    Identify the single clickable UI element that best matches the user's request. Return exactly one short phrase followed by one [POINT:x,y:label] tag. Use screenshot pixel coordinates with origin at the top-left. If there is no safe matching target, return [POINT:none].
+    """
+
     private func attemptProactiveElementPointingIfUseful(
         transcript: String,
         spokenText: String,
@@ -11203,6 +11618,7 @@ final class CompanionManager: ObservableObject {
         detectedElementBubbleText = Self.shortPointingCaption(from: spokenText)
         detectedElementDisplayFrame = displayFrame
         detectedElementScreenLocation = globalLocation
+        rememberPointedElement(at: globalLocation, displayFrame: displayFrame, label: "proactive")
         ClickyAnalytics.trackElementPointed(elementLabel: "proactive")
         print("🎯 Proactive element pointing: (\(Int(displayLocalLocation.x)), \(Int(displayLocalLocation.y)))")
     }
