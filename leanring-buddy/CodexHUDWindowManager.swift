@@ -1,6 +1,7 @@
 import AppKit
 import SwiftUI
 import UniformTypeIdentifiers
+import Combine
 
 private enum OpenClickyHUDLayout {
     static let width: CGFloat = 594
@@ -160,6 +161,7 @@ private struct CodexHUDView: View {
     @State private var expandedCommandGroupIDs: Set<String> = []
     @State private var droppedAttachments: [HUDDraftAttachment] = []
     @State private var isDropTargeted = false
+    @State private var timestampNow = Date()
 
     private var session: CodexAgentSession {
         companionManager.codexAgentSession
@@ -251,6 +253,9 @@ private struct CodexHUDView: View {
         )
         .animation(.none, value: selectedAccentThemeID)
         .animation(.easeOut(duration: DS.Animation.fast), value: isDropTargeted)
+        .onReceive(Timer.publish(every: 30, on: .main, in: .common).autoconnect()) { now in
+            timestampNow = now
+        }
         .onChange(of: session.id) {
             hiddenOverlayDockItemID = nil
         }
@@ -328,6 +333,10 @@ private struct CodexHUDView: View {
                             transcriptRow(item)
                                 .id(item.id)
                         }
+                        if session.isTurnActiveForChatQueue {
+                            reasoningStatusRow
+                                .id("reasoning-status-\(session.id.uuidString)")
+                        }
                     }
                 }
                 .padding(10)
@@ -385,14 +394,14 @@ private struct CodexHUDView: View {
 
         return HStack(alignment: .top, spacing: 0) {
             if isUser {
-                Spacer(minLength: 62)
+                Spacer(minLength: 42)
             }
 
             transcriptBubble(entry, isUser: isUser)
                 .frame(maxWidth: 430, alignment: isUser ? .trailing : .leading)
 
             if !isUser {
-                Spacer(minLength: 62)
+                Spacer(minLength: 42)
             }
         }
         .frame(maxWidth: .infinity, alignment: isUser ? .trailing : .leading)
@@ -400,10 +409,18 @@ private struct CodexHUDView: View {
 
     private func transcriptBubble(_ entry: CodexTranscriptEntry, isUser: Bool) -> some View {
         VStack(alignment: isUser ? .trailing : .leading, spacing: 5) {
-            Text(label(for: entry.role))
-                .font(.system(size: 9, weight: .bold))
-                .foregroundColor(color(for: entry.role))
-                .frame(maxWidth: .infinity, alignment: isUser ? .trailing : .leading)
+            HStack(spacing: 6) {
+                if isUser { Spacer(minLength: 0) }
+                Text(label(for: entry.role))
+                    .font(.system(size: 9, weight: .bold))
+                    .foregroundColor(color(for: entry.role))
+                Text(Self.relativeTimeString(from: entry.createdAt, now: timestampNow))
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundColor(DS.Colors.textTertiary)
+                if !isUser { Spacer(minLength: 0) }
+            }
+            .frame(maxWidth: .infinity, alignment: isUser ? .trailing : .leading)
+
             Text(entry.text)
                 .font(.system(size: 11, design: entry.role == .command ? .monospaced : .default))
                 .foregroundColor(DS.Colors.textPrimary)
@@ -433,6 +450,26 @@ private struct CodexHUDView: View {
                 }
                 .frame(maxWidth: .infinity, alignment: isUser ? .trailing : .leading)
             }
+
+            HStack(spacing: 6) {
+                if isUser { Spacer(minLength: 0) }
+                Button {
+                    prompt = Self.replyDraft(for: entry)
+                } label: {
+                    Label("Reply", systemImage: "arrowshape.turn.up.left")
+                        .font(.system(size: 9, weight: .heavy))
+                }
+                .buttonStyle(.plain)
+                .foregroundColor(DS.Colors.textSecondary)
+                .padding(.horizontal, 7)
+                .padding(.vertical, 4)
+                .background(Capsule(style: .continuous).fill(Color.white.opacity(0.055)))
+                .overlay(Capsule(style: .continuous).stroke(Color.white.opacity(0.09), lineWidth: 0.5))
+                .pointerCursor()
+                .accessibilityLabel("Reply to \(label(for: entry.role).lowercased()) message")
+                if !isUser { Spacer(minLength: 0) }
+            }
+            .frame(maxWidth: .infinity, alignment: isUser ? .trailing : .leading)
         }
         .padding(9)
         .frame(maxWidth: .infinity, alignment: isUser ? .trailing : .leading)
@@ -444,6 +481,64 @@ private struct CodexHUDView: View {
             RoundedRectangle(cornerRadius: 13, style: .continuous)
                 .stroke(Color.white.opacity(isUser ? 0.085 : 0.055), lineWidth: 0.5)
         )
+    }
+
+    private var reasoningStatusRow: some View {
+        HStack(alignment: .top, spacing: 8) {
+            ClickyThinkingDots(tint: DS.Colors.accentText)
+                .padding(.top, 2)
+
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 6) {
+                    Text(reasoningStatusTitle)
+                        .font(.system(size: 10, weight: .heavy))
+                        .foregroundColor(DS.Colors.textPrimary)
+                    Text(Self.relativeTimeString(from: session.entries.last?.createdAt ?? Date(), now: timestampNow))
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundColor(DS.Colors.textTertiary)
+                }
+
+                if let latest = session.latestActivityDisplaySummary ?? session.latestActivitySummary {
+                    Text(latest)
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundColor(DS.Colors.textSecondary)
+                        .lineLimit(2)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .background(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(Color.white.opacity(0.045))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(DS.Colors.accentText.opacity(0.16), lineWidth: 0.7)
+        )
+        .frame(maxWidth: 430, alignment: .leading)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var reasoningStatusTitle: String {
+        switch session.progressStage {
+        case .planning:
+            return "Reasoning"
+        case .executing:
+            return "Working"
+        case .composing:
+            return "Writing reply"
+        case .starting:
+            return "Starting"
+        case .completed:
+            return "Finishing"
+        case .failed:
+            return "Stopped"
+        case .idle:
+            return "Thinking"
+        }
     }
 
     private func commandSummaryRow(
@@ -915,6 +1010,31 @@ private struct CodexHUDView: View {
             options: .regularExpression
         )
         return text.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func replyDraft(for entry: CodexTranscriptEntry) -> String {
+        let text = messageDisplayText(from: entry.text)
+            .replacingOccurrences(of: "\n", with: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let snippet = String(text.prefix(120))
+        guard !snippet.isEmpty else { return "Replying to the \(entry.role.rawValue) message: " }
+        return "Replying to “\(snippet)\(text.count > snippet.count ? "…" : "")”: "
+    }
+
+    private static func relativeTimeString(from date: Date, now: Date) -> String {
+        let seconds = max(0, Int(now.timeIntervalSince(date)))
+        if seconds < 10 { return "just now" }
+        if seconds < 60 { return "\(seconds)s ago" }
+        let minutes = seconds / 60
+        if minutes < 60 { return "\(minutes)m ago" }
+        let hours = minutes / 60
+        if hours < 24 { return "\(hours)h ago" }
+        let days = hours / 24
+        if days < 7 { return "\(days)d ago" }
+        let formatter = DateFormatter()
+        formatter.dateStyle = .short
+        formatter.timeStyle = .none
+        return formatter.string(from: date)
     }
 
     private func toolLabel(for commandText: String) -> String {

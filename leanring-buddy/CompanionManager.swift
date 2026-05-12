@@ -797,6 +797,7 @@ final class CompanionManager: ObservableObject {
     private var audioPowerCancellable: AnyCancellable?
     private var externalControlBridgeServer: OpenClickyExternalControlBridgeServer?
     private var externalProxyClearTask: Task<Void, Never>?
+    private var agentTaskBubbleClearTask: Task<Void, Never>?
     private var externalPrimaryCursorMoveTask: Task<Void, Never>?
     private var externalSecondaryCursorClearTasks: [UUID: Task<Void, Never>] = [:]
     private var agentStatusCancellables: [UUID: AnyCancellable] = [:]
@@ -954,6 +955,7 @@ final class CompanionManager: ObservableObject {
     private static let tutorObservationVoiceCooldown: TimeInterval = 90
     private var agentDockFollowTimer: Timer?
     private var isRealtimeBidirectionalVoiceCaptureActive = false
+    private var isRealtimeBidirectionalVoiceInputReady = false
     private var realtimeBidirectionalVoiceCaptureStartedAt: Date?
     private var realtimeBidirectionalVoiceTask: Task<Void, Never>?
 
@@ -1823,6 +1825,9 @@ final class CompanionManager: ObservableObject {
         externalControlBridgeServer = nil
         externalProxyClearTask?.cancel()
         externalProxyClearTask = nil
+        agentTaskBubbleClearTask?.cancel()
+        agentTaskBubbleClearTask = nil
+        cursorOverlayState.agentTaskBubbleText = nil
         externalPrimaryCursorMoveTask?.cancel()
         externalPrimaryCursorMoveTask = nil
         externalSecondaryCursorClearTasks.values.forEach { $0.cancel() }
@@ -2000,6 +2005,18 @@ final class CompanionManager: ObservableObject {
             .receive(on: DispatchQueue.main)
             .sink { [weak self] isKeyboardRecording, isMicrophoneButtonRecording, isFinalizing, isPreparing in
                 guard let self else { return }
+                // Realtime/Voice Agent microphone capture bypasses
+                // BuddyDictationManager, so its recording flags stay false
+                // while macOS is genuinely using the mic. Do not let this
+                // observer flip the cursor back to idle during that direct
+                // capture path.
+                if self.isRealtimeBidirectionalVoiceCaptureActive {
+                    if self.voiceState != .responding {
+                        self.voiceState = .listening
+                    }
+                    return
+                }
+
                 // Don't let an old speaking state mask a real microphone
                 // capture. Push-to-talk can interrupt speech and immediately
                 // start listening; in that case the cursor must switch to the
@@ -2612,10 +2629,12 @@ final class CompanionManager: ObservableObject {
         }
 
         isRealtimeBidirectionalVoiceCaptureActive = true
+        isRealtimeBidirectionalVoiceInputReady = false
         realtimeBidirectionalVoiceCaptureStartedAt = Date()
         voiceState = .listening
         currentAudioPowerLevel = 0
         latestVoiceResponseCard = nil
+        showCursorOverlayIfAvailable()
 
         let startedAt = Date()
         let historyForAPI = voiceConversationHistoryForAPI()
@@ -2683,15 +2702,25 @@ final class CompanionManager: ObservableObject {
                         onPlaybackStarted: onPlaybackStarted
                     )
                 }
-                OpenClickyMessageLogStore.shared.append(
-                    lane: "voice",
-                    direction: "internal",
-                    event: "voice.realtime_bidirectional.input_ready",
-                    fields: [
-                        "source": source,
-                        "startupDurationMs": Self.elapsedMilliseconds(since: startedAt)
-                    ]
-                )
+                await MainActor.run {
+                    guard self.isRealtimeBidirectionalVoiceCaptureActive,
+                          !Task.isCancelled else {
+                        self.openAIRealtimeSpeechClient.cancelBidirectionalVoiceTurn()
+                        self.deepgramVoiceAgentClient.cancelBidirectionalVoiceTurn()
+                        return
+                    }
+                    self.isRealtimeBidirectionalVoiceInputReady = true
+                    self.voiceState = .listening
+                    OpenClickyMessageLogStore.shared.append(
+                        lane: "voice",
+                        direction: "internal",
+                        event: "voice.realtime_bidirectional.input_ready",
+                        fields: [
+                            "source": source,
+                            "startupDurationMs": Self.elapsedMilliseconds(since: startedAt)
+                        ]
+                    )
+                }
             } catch {
                 await MainActor.run {
                     self?.handleBidirectionalRealtimeVoiceFailure(error, source: source, stage: "start")
@@ -2703,7 +2732,32 @@ final class CompanionManager: ObservableObject {
     @discardableResult
     private func finishBidirectionalRealtimeVoiceCaptureIfNeeded(source: String) -> Bool {
         guard isRealtimeBidirectionalVoiceCaptureActive else { return false }
+        if !isRealtimeBidirectionalVoiceInputReady {
+            isRealtimeBidirectionalVoiceCaptureActive = false
+            isRealtimeBidirectionalVoiceInputReady = false
+            realtimeBidirectionalVoiceCaptureStartedAt = nil
+            realtimeBidirectionalVoiceTask?.cancel()
+            realtimeBidirectionalVoiceTask = nil
+            openAIRealtimeSpeechClient.cancelBidirectionalVoiceTurn()
+            deepgramVoiceAgentClient.cancelBidirectionalVoiceTurn()
+            currentAudioPowerLevel = 0
+            voiceState = .idle
+            OpenClickyMessageLogStore.shared.append(
+                lane: "voice",
+                direction: "internal",
+                event: "voice.realtime_bidirectional.start_cancelled_before_ready",
+                fields: [
+                    "source": source,
+                    "speechModel": selectedModel,
+                    "speechVoice": activeRealtimeSpeechVoiceID,
+                    "inputPath": activeRealtimeInputPath
+                ]
+            )
+            return true
+        }
+
         isRealtimeBidirectionalVoiceCaptureActive = false
+        isRealtimeBidirectionalVoiceInputReady = false
         voiceState = .processing
 
         let finishedAt = Date()
@@ -2872,6 +2926,7 @@ final class CompanionManager: ObservableObject {
         openAIRealtimeSpeechClient.cancelBidirectionalVoiceTurn()
         deepgramVoiceAgentClient.cancelBidirectionalVoiceTurn()
         isRealtimeBidirectionalVoiceCaptureActive = false
+        isRealtimeBidirectionalVoiceInputReady = false
         realtimeBidirectionalVoiceCaptureStartedAt = nil
         voiceState = .idle
         OpenClickyMessageLogStore.shared.append(
@@ -8700,6 +8755,7 @@ final class CompanionManager: ObservableObject {
 
         let directTitleRules: [(pattern: String, title: String)] = [
             (#"(?i)\b(?:see\s+(?:the\s+)?issue\s+here|look\s+at\s+this|fix\s+this)\b.*\b(?:OpenClickyLog|NSXPCDecoder|ViewBridge|unifiedReasons|NSXPCConnection)\b"#, "Log Issue Review"),
+            (#"(?i)\b(?:OpenClickyLog|NSXPCDecoder|NSXPCInterface|NSXPCConnection|ViewBridge|NSViewBridgeError|Unable to obtain a task name port right|nw_protocol_instance|nw_read_request_report|unifiedReasons)\b"#, "Log Issue Review"),
             (#"(?i)\b(?:whole|full)\s+(?:task\s+)?names?\b"#, "Task Status Wording"),
             (#"(?i)\bshort\s+(?:version|task\s+name|name)\b"#, "Task Status Wording"),
             (#"(?i)\b(?:read(?:ing)?\s+out|speak(?:ing)?|say(?:ing)?)\b.*\b(?:whole|full|long|raw)\b.*\b(?:task\s+)?(?:name|title|request)\b"#, "Task Title Cleanup"),
@@ -8970,27 +9026,51 @@ final class CompanionManager: ObservableObject {
         guard let item = agentDockItems.reversed().first(where: { dockItem in
             dockItem.status == .starting || dockItem.status == .running
         }) else {
-            cursorOverlayState.agentTaskBubbleText = nil
+            clearAgentTaskBubbleText()
             return
         }
 
         let session = item.sessionID.flatMap { sessionID in
             codexAgentSessions.first(where: { $0.id == sessionID })
         }
-        cursorOverlayState.agentTaskBubbleText = Self.cursorAgentTaskLabel(for: item, session: session)
+        let nextLabel = Self.cursorAgentTaskLabel(for: item, session: session)
+        guard !nextLabel.isEmpty else {
+            clearAgentTaskBubbleText()
+            return
+        }
+
+        cursorOverlayState.agentTaskBubbleText = nextLabel
+        scheduleAgentTaskBubbleClear(matching: nextLabel)
+    }
+
+    private func clearAgentTaskBubbleText() {
+        agentTaskBubbleClearTask?.cancel()
+        agentTaskBubbleClearTask = nil
+        cursorOverlayState.agentTaskBubbleText = nil
+    }
+
+    private func scheduleAgentTaskBubbleClear(matching label: String, after delay: TimeInterval = 3.0) {
+        agentTaskBubbleClearTask?.cancel()
+        agentTaskBubbleClearTask = Task { [weak self] in
+            let nanoseconds = UInt64(max(0.2, delay) * 1_000_000_000)
+            try? await Task.sleep(nanoseconds: nanoseconds)
+            await MainActor.run {
+                guard let self, self.cursorOverlayState.agentTaskBubbleText == label else { return }
+                self.cursorOverlayState.agentTaskBubbleText = nil
+                self.agentTaskBubbleClearTask = nil
+            }
+        }
     }
 
     private static func cursorAgentTaskLabel(for item: ClickyAgentDockItem, session: CodexAgentSession?) -> String {
         let title = item.title.trimmingCharacters(in: .whitespacesAndNewlines)
         let fallbackTitle = title.isEmpty ? "Agent task" : title
         let stageLabel = session?.progressStage.label ?? (item.status == .starting ? "Starting" : "Working")
-        let latestStatusLine = item.activityStatusLines.last?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let caption = item.caption?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let detail = latestStatusLine?.isEmpty == false
-            ? latestStatusLine!
-            : (caption?.isEmpty == false ? caption! : fallbackTitle)
 
-        return shortCursorAgentTaskLabel("\(stageLabel): \(detail)")
+        // The cursor bubble is only a transient cue; the dock/HUD owns detailed progress.
+        // Keeping it title-based prevents long streamed status lines from wrapping into
+        // clipped, ellipsis-heavy captions beside the cursor.
+        return shortCursorAgentTaskLabel("\(stageLabel): \(fallbackTitle)")
     }
 
     private static func shortCursorAgentTaskLabel(_ text: String) -> String {
@@ -8999,14 +9079,15 @@ final class CompanionManager: ObservableObject {
             .filter { !$0.isEmpty }
             .joined(separator: " ")
 
-        guard flattened.count > 76 else { return flattened }
+        let maxCharacters = 64
+        guard flattened.count > maxCharacters else { return flattened }
 
-        let endIndex = flattened.index(flattened.startIndex, offsetBy: 76)
+        let endIndex = flattened.index(flattened.startIndex, offsetBy: maxCharacters)
         let prefix = String(flattened[..<endIndex])
-        if let lastSpace = prefix.lastIndex(of: " ") {
-            return "\(prefix[..<lastSpace])..."
+        if let lastSpace = prefix.lastIndex(of: " "), lastSpace > prefix.startIndex {
+            return String(prefix[..<lastSpace]).trimmingCharacters(in: .whitespacesAndNewlines)
         }
-        return "\(prefix)..."
+        return prefix.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private func completeAgentRequestTimingIfNeeded(
@@ -9806,6 +9887,7 @@ final class CompanionManager: ObservableObject {
         realtimeBidirectionalVoiceTask?.cancel()
         realtimeBidirectionalVoiceTask = nil
         isRealtimeBidirectionalVoiceCaptureActive = false
+        isRealtimeBidirectionalVoiceInputReady = false
         codexVoiceSession.cancelActiveTurn(reason: "voice_response_interrupted")
         openAIRealtimeSpeechClient.stopPlayback()
         deepgramVoiceAgentClient.stopPlayback()
@@ -10140,9 +10222,18 @@ final class CompanionManager: ObservableObject {
         let singleLine = parsed
             .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
             .trimmingCharacters(in: .whitespacesAndNewlines)
-        let maxCharacters = 180
+        let maxCharacters = 260
         guard singleLine.count > maxCharacters else { return singleLine }
-        return String(singleLine.prefix(maxCharacters)).trimmingCharacters(in: .whitespacesAndNewlines) + "…"
+
+        let endIndex = singleLine.index(singleLine.startIndex, offsetBy: maxCharacters)
+        let prefix = String(singleLine[..<endIndex])
+        if let sentenceBreak = prefix.lastIndex(where: { ".!?".contains($0) }), sentenceBreak > prefix.startIndex {
+            return String(prefix[...sentenceBreak]).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        if let lastSpace = prefix.lastIndex(of: " "), lastSpace > prefix.startIndex {
+            return String(prefix[..<lastSpace]).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        return prefix.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private func speakShortSystemResponse(

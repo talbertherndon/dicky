@@ -985,8 +985,31 @@ final class CodexAgentSession: ObservableObject, Identifiable {
         let matches = regex.matches(in: text, range: NSRange(location: 0, length: nsText.length))
         return matches.compactMap { match in
             guard match.range.location != NSNotFound else { return nil }
-            return nsText.substring(with: match.range)
+            let candidate = nsText.substring(with: match.range)
+            return isLikelyRealFilePath(candidate) ? candidate : nil
         }
+    }
+
+    private static func isLikelyRealFilePath(_ candidate: String) -> Bool {
+        if candidate.contains("/") || candidate.hasPrefix("~/") {
+            return true
+        }
+
+        // Console snippets often contain reverse-DNS domains that look like
+        // header files, e.g. `com.apple.ViewBridge.error.h`. Those are log
+        // identifiers, not editable files, so do not claim leases for them.
+        let lowered = candidate.lowercased()
+        let reverseDNSPrefixes = ["com.", "org.", "net.", "io.", "dev.", "app."]
+        if reverseDNSPrefixes.contains(where: { lowered.hasPrefix($0) }) {
+            return false
+        }
+
+        let dotCount = candidate.filter { $0 == "." }.count
+        if dotCount >= 3 {
+            return false
+        }
+
+        return true
     }
 
     private func appendAssistantDelta(itemID: String, delta: String) {
@@ -1673,6 +1696,7 @@ final class CodexAgentSession: ObservableObject, Identifiable {
 
     private static func shouldKeepInitialTaskTitle(_ title: String) -> Bool {
         let stableTitles: Set<String> = [
+            "Log Issue Review",
             "Task Title Cleanup",
             "Task Title Stability",
             "Task Title Ordering",
@@ -1902,6 +1926,7 @@ final class CodexAgentSession: ObservableObject, Identifiable {
 
         let directTitleRules: [(pattern: String, title: String)] = [
             (#"(?i)\b(?:see\s+(?:the\s+)?issue\s+here|look\s+at\s+this|fix\s+this)\b.*\b(?:OpenClickyLog|NSXPCDecoder|ViewBridge|unifiedReasons|NSXPCConnection)\b"#, "Log Issue Review"),
+            (#"(?i)\b(?:OpenClickyLog|NSXPCDecoder|NSXPCInterface|NSXPCConnection|ViewBridge|NSViewBridgeError|Unable to obtain a task name port right|nw_protocol_instance|nw_read_request_report|unifiedReasons)\b"#, "Log Issue Review"),
             (#"(?i)\b(?:whole|full)\s+(?:task\s+)?names?\b"#, "Task Status Wording"),
             (#"(?i)\bshort\s+(?:version|task\s+name|name)\b"#, "Task Status Wording"),
             (#"(?i)\b(?:read(?:ing)?\s+out|speak(?:ing)?|say(?:ing)?)\b.*\b(?:whole|full|long|raw)\b.*\b(?:task\s+)?(?:name|title|request)\b"#, "Task Title Cleanup"),

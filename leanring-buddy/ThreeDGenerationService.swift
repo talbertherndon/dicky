@@ -4,7 +4,7 @@
 // - Persists results to ~/Library/Application Support/OpenClicky/Generated3D/.
 // - Publishes an ObservableObject the UI binds to for in-flight + finished jobs.
 
-import Combine
+@preconcurrency import Combine
 import Foundation
 import SwiftUI
 
@@ -83,23 +83,24 @@ final class ThreeDGenerationService: ObservableObject {
         let dir = assetsDirectory
         let p = provider
 
-        Task.detached { [weak self] in
+        let service = WeakThreeDGenerationService(self)
+        Task.detached {
             do {
                 let result = try await p.generate(
                     request: request,
                     destinationDirectory: dir,
                     onProgress: { progress in
                         Task { @MainActor in
-                            self?.update(jobId: jobId, with: progress)
+                            service.value?.update(jobId: jobId, with: progress)
                         }
                     }
                 )
                 await MainActor.run {
-                    self?.finish(jobId: jobId, result: result)
+                    service.value?.finish(jobId: jobId, result: result)
                 }
             } catch {
                 await MainActor.run {
-                    self?.fail(jobId: jobId, error: error)
+                    service.value?.fail(jobId: jobId, error: error)
                 }
             }
         }
@@ -209,7 +210,7 @@ final class ThreeDGenerationService: ObservableObject {
 
     // MARK: - Paths & keys
 
-    static func defaultAssetsDirectory() -> URL {
+    nonisolated static func defaultAssetsDirectory() -> URL {
         let base = FileManager.default
             .urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
         return base
@@ -219,7 +220,7 @@ final class ThreeDGenerationService: ObservableObject {
 
     /// Reads the Tripo API key. Reads UserDefaults first (set from Settings UI),
     /// then env var. Swap for Keychain when wiring into the existing key flow.
-    static func readTripoAPIKey() -> String? {
+    nonisolated static func readTripoAPIKey() -> String? {
         if let k = UserDefaults.standard.string(forKey: "OpenClicky.Tripo3D.APIKey"),
            !k.isEmpty { return k }
         if let env = ProcessInfo.processInfo.environment["TRIPO_API_KEY"],
@@ -228,9 +229,18 @@ final class ThreeDGenerationService: ObservableObject {
     }
 }
 
+private final class WeakThreeDGenerationService: @unchecked Sendable {
+    @MainActor weak var value: ThreeDGenerationService?
+
+    @MainActor
+    init(_ value: ThreeDGenerationService?) {
+        self.value = value
+    }
+}
+
 // MARK: - Job
 
-struct ThreeDJob: Identifiable, Equatable {
+nonisolated struct ThreeDJob: Identifiable, Equatable, Sendable {
     let id: UUID
     let prompt: String
     let style: ThreeDStyle

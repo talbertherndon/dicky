@@ -6,10 +6,10 @@
 // Falls back to a graceful error placeholder if the GLB can't be loaded.
 
 import SwiftUI
-import SceneKit
+@preconcurrency import SceneKit
 
 #if canImport(GLTFSceneKit)
-import GLTFSceneKit
+@preconcurrency import GLTFSceneKit
 #endif
 
 struct ThreeDViewerView: View {
@@ -120,9 +120,9 @@ struct ThreeDViewerView: View {
 
     // MARK: - GLB → SCNScene
 
-    private static func loadScene(from url: URL) throws -> SCNScene {
+    private nonisolated static func loadScene(from url: URL) throws -> SCNScene {
         #if canImport(GLTFSceneKit)
-        let source = try GLTFSceneSource(url: url)
+        let source = GLTFSceneSource(url: url)
         return try source.scene()
         #else
         // Fallback: SceneKit can natively load .scn / .usdz only.

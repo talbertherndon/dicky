@@ -656,7 +656,7 @@ struct BlueCursorView: View {
                 Text(agentTaskBubbleText)
                     .font(.system(size: 11, weight: .semibold))
                     .foregroundColor(captionBubbleTextColor)
-                    .lineLimit(2)
+                    .lineLimit(3)
                     .multilineTextAlignment(.leading)
                     .padding(.horizontal, 9)
                     .padding(.vertical, 5)
@@ -665,7 +665,7 @@ struct BlueCursorView: View {
                             .fill(captionBubbleBackgroundColor)
                             .shadow(color: captionBubbleShadowColor, radius: 8, x: 0, y: 2)
                     )
-                    .frame(maxWidth: 260, alignment: .leading)
+                    .frame(maxWidth: 300, alignment: .leading)
                     .fixedSize(horizontal: false, vertical: true)
                     .overlay(
                         GeometryReader { geo in
@@ -886,7 +886,7 @@ struct BlueCursorView: View {
         Text(caption)
             .font(OpenClickyResponseCaptionFont.resolved(voiceResponseCaptionFontRawValue).swiftUIFont(size: 11, weight: .semibold))
             .foregroundColor(captionBubbleTextColor)
-            .lineLimit(3)
+            .lineLimit(5)
             .multilineTextAlignment(.leading)
             .padding(.horizontal, 9)
             .padding(.vertical, 5)
@@ -895,7 +895,7 @@ struct BlueCursorView: View {
                     .fill(captionBubbleBackgroundColor)
                     .shadow(color: captionBubbleShadowColor, radius: 8, x: 0, y: 2)
             )
-            .frame(maxWidth: 280, alignment: .leading)
+            .frame(maxWidth: 340, alignment: .leading)
             .fixedSize(horizontal: false, vertical: true)
             .overlay(
                 GeometryReader { geo in

@@ -10,7 +10,7 @@ import Foundation
 
 /// User-facing style hint. Translated per-provider into either a `style`
 /// API field or prompt-engineering prefix.
-enum ThreeDStyle: String, Codable, CaseIterable, Sendable {
+nonisolated enum ThreeDStyle: String, Codable, CaseIterable, Sendable {
     case lowPolyStylized   // Default for OpenClicky chat
     case clay
     case voxel
@@ -63,7 +63,7 @@ struct ThreeDGenerationRequest: Sendable {
 
 // MARK: - Outputs
 
-enum ThreeDTaskStatus: String, Codable, Sendable {
+nonisolated enum ThreeDTaskStatus: String, Codable, Sendable {
     case queued
     case running
     case success
@@ -71,7 +71,7 @@ enum ThreeDTaskStatus: String, Codable, Sendable {
     case cancelled
 }
 
-struct ThreeDGenerationProgress: Sendable {
+nonisolated struct ThreeDGenerationProgress: Sendable {
     let status: ThreeDTaskStatus
     /// 0.0 – 1.0 when the provider supplies it; nil otherwise.
     let progress: Double?
@@ -84,7 +84,7 @@ struct ThreeDGenerationProgress: Sendable {
     }
 }
 
-struct ThreeDGenerationResult: Sendable {
+nonisolated struct ThreeDGenerationResult: Sendable {
     let taskId: String
     /// Local file URL of the downloaded GLB.
     let glbURL: URL
@@ -120,7 +120,7 @@ struct ThreeDGenerationResult: Sendable {
 
 // MARK: - Errors
 
-enum ThreeDGenerationError: LocalizedError, Sendable {
+nonisolated enum ThreeDGenerationError: LocalizedError, Sendable {
     case missingAPIKey(provider: String)
     case submissionFailed(provider: String, status: Int, body: String)
     case pollingFailed(provider: String, status: Int, body: String)
@@ -154,7 +154,7 @@ enum ThreeDGenerationError: LocalizedError, Sendable {
 
 // MARK: - Provider protocol
 
-protocol ThreeDGenerationProvider: Sendable {
+nonisolated protocol ThreeDGenerationProvider: Sendable {
     /// Stable identifier for telemetry / settings UI ("tripo", "meshy", …).
     var identifier: String { get }
     /// Human label for menus.
