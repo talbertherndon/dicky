@@ -127,7 +127,6 @@ struct OpenClickyNotchPanelView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            notchLip
             mainSurface
         }
         .frame(width: 430)
@@ -145,63 +144,6 @@ struct OpenClickyNotchPanelView: View {
         .onChange(of: gogStatus) { _ in
             notifyPanelSizeChanged()
         }
-    }
-
-    private var notchLip: some View {
-        ZStack(alignment: .bottom) {
-            Capsule(style: .continuous)
-                .fill(
-                    LinearGradient(
-                        colors: [Color.black.opacity(0.94), DS.Colors.surface1.opacity(0.92)],
-                        startPoint: .top,
-                        endPoint: .bottom
-                    )
-                )
-                .overlay(
-                    Capsule(style: .continuous)
-                        .stroke(Color.white.opacity(0.10), lineWidth: 1)
-                )
-                .shadow(color: Color.black.opacity(0.46), radius: 18, x: 0, y: 12)
-
-            HStack(spacing: 8) {
-                Image(systemName: activeVoiceIcon)
-                    .font(.system(size: 12, weight: .black))
-                    .foregroundColor(activeVoiceAccent)
-                    .frame(width: 24, height: 24)
-                    .background(Circle().fill(activeVoiceAccent.opacity(0.16)))
-
-                VStack(alignment: .leading, spacing: 1) {
-                    Text("OpenClicky")
-                        .font(.system(size: 12, weight: .heavy))
-                        .foregroundColor(DS.Colors.textPrimary)
-                    Text("Fast voice preserved · \(activeVoiceLabel)")
-                        .font(.system(size: 9, weight: .semibold))
-                        .foregroundColor(DS.Colors.textSecondary)
-                }
-
-                Spacer(minLength: 8)
-
-                voicePulseMeter
-
-                Button {
-                    setPanelPinned(!isPanelPinned)
-                } label: {
-                    Image(systemName: isPanelPinned ? "pin.fill" : "pin")
-                        .font(.system(size: 11, weight: .bold))
-                        .foregroundColor(isPanelPinned ? DS.Colors.accentText : DS.Colors.textSecondary)
-                        .frame(width: 25, height: 25)
-                        .background(Circle().fill(Color.white.opacity(isPanelPinned ? 0.11 : 0.06)))
-                }
-                .buttonStyle(.plain)
-                .help(isPanelPinned ? "Unpin panel" : "Pin panel")
-            }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 9)
-        }
-        .frame(height: 58)
-        .padding(.horizontal, 30)
-        .padding(.bottom, -12)
-        .zIndex(2)
     }
 
     private var mainSurface: some View {
@@ -689,20 +631,6 @@ struct OpenClickyNotchPanelView: View {
                 )
             }
         }
-    }
-
-    private var voicePulseMeter: some View {
-        HStack(alignment: .center, spacing: 3) {
-            ForEach(0..<5, id: \.self) { index in
-                let normalized = max(0.08, min(1.0, companionManager.currentAudioPowerLevel + CGFloat(index) * 0.06))
-                RoundedRectangle(cornerRadius: 2, style: .continuous)
-                    .fill(activeVoiceAccent.opacity(0.72))
-                    .frame(width: 3, height: 7 + (normalized * CGFloat(12 + index)))
-            }
-        }
-        .frame(width: 34, height: 24)
-        .padding(.horizontal, 7)
-        .background(Capsule(style: .continuous).fill(Color.white.opacity(0.06)))
     }
 
     private func agentRow(_ session: CodexAgentSession) -> some View {
