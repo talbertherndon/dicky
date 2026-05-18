@@ -8,8 +8,8 @@ private enum OpenClickyHUDLayout {
     static let minimumWidth: CGFloat = 594
     static let minimumHeight: CGFloat = 452
     static let screenEdgePadding: CGFloat = 20
-    static let bottomOffset: CGFloat = 24
-    static let minimumAvailableDimension: CGFloat = 1
+    static let preferredBottomMargin: CGFloat = 24
+    static let fallbackMinimumDimension: CGFloat = 1
 }
 
 @MainActor
@@ -88,7 +88,7 @@ final class CodexHUDWindowManager {
 
     private func enforceMinimumSize() {
         guard let panel else { return }
-        guard let visibleFrame = visibleScreenFrameForMouseOrPanel(for: panel) else { return }
+        guard let visibleFrame = visibleScreenFrame(for: panel) else { return }
 
         let availableWidth = availableDimension(for: visibleFrame.width)
         let availableHeight = availableDimension(for: visibleFrame.height)
@@ -117,7 +117,7 @@ final class CodexHUDWindowManager {
 
     private func positionPanel() {
         guard let panel else { return }
-        guard let frame = visibleScreenFrameForMouseOrPanel(for: panel) else { return }
+        guard let frame = visibleScreenFrame(for: panel) else { return }
 
         let edgePadding = OpenClickyHUDLayout.screenEdgePadding
         let size = panel.frame.size
@@ -126,20 +126,20 @@ final class CodexHUDWindowManager {
         let minY = frame.minY + edgePadding
         let maxY = constrainedMaximumOrigin(maximumBoundary: frame.maxY, contentDimension: size.height, minimumOrigin: minY, edgePadding: edgePadding)
         let preferredX = frame.midX - size.width / 2
-        let preferredY = frame.minY + OpenClickyHUDLayout.bottomOffset
+        let preferredY = frame.minY + OpenClickyHUDLayout.preferredBottomMargin
         let x = min(max(preferredX, minX), maxX)
         let y = min(max(preferredY, minY), maxY)
         panel.setFrameOrigin(NSPoint(x: x, y: y))
     }
 
-    private func visibleScreenFrameForMouseOrPanel(for panel: NSPanel) -> NSRect? {
+    private func visibleScreenFrame(for panel: NSPanel) -> NSRect? {
         let screen = NSScreen.screen(containingOrNearestTo: NSEvent.mouseLocation) ?? panel.screen
         return screen?.visibleFrame
     }
 
     private func availableDimension(for visibleDimension: CGFloat) -> CGFloat {
         max(
-            OpenClickyHUDLayout.minimumAvailableDimension,
+            OpenClickyHUDLayout.fallbackMinimumDimension,
             visibleDimension - (OpenClickyHUDLayout.screenEdgePadding * 2)
         )
     }
