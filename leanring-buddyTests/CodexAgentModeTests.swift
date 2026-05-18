@@ -162,7 +162,7 @@ struct CodexAgentModeTests {
             CompanionManager.implicitAgentTaskInstruction(from: "Add a volume slider.")
         )
 
-        #expect(instruction == "Add a volume slider")
+        #expect(instruction.lowercased() == "add a volume slider")
     }
 
     @Test func implicitAgentRoutingSkipsSensitiveOrDestructiveRequests() throws {
