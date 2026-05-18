@@ -154,7 +154,7 @@ struct ChatWorkspaceView: View {
   private func send() {
     let trimmed = draft.trimmingCharacters(in: .whitespacesAndNewlines)
     guard !trimmed.isEmpty else { return }
-    companionManager.submitAgentPromptFromUI(trimmed)
+    companionManager.submitNewAgentTaskFromUI(trimmed, source: "chat_workspace_prompt")
     draft = ""
   }
 }

@@ -157,7 +157,7 @@ enum CodexAgentSessionStatus: Equatable {
 
     var label: String {
         switch self {
-        case .stopped: return "Offline"
+        case .stopped: return "Ready"
         case .starting: return "Starting"
         case .ready: return "Ready"
         case .running: return "Running"
@@ -191,6 +191,7 @@ enum CodexAgentProgressStage: Equatable {
 @MainActor
 final class CodexAgentSession: ObservableObject, Identifiable {
     let id: UUID
+    let createdAt: Date
     let accentTheme: ClickyAccentTheme
     @Published private(set) var status: CodexAgentSessionStatus = .stopped
     @Published private(set) var entries: [CodexTranscriptEntry] = []
@@ -237,7 +238,10 @@ final class CodexAgentSession: ObservableObject, Identifiable {
 
         switch status {
         case .stopped:
-            return "\(taskTitle) is offline."
+            guard hasVisibleActivity else {
+                return "No agent task has been started yet."
+            }
+            return "\(taskTitle) is stopped."
         case .starting:
             return "\(taskTitle) is starting."
         case .running:
@@ -267,6 +271,10 @@ final class CodexAgentSession: ObservableObject, Identifiable {
         Self.latestActivityDisplaySummary(from: entries)
     }
 
+    var latestActivityDate: Date {
+        entries.last?.createdAt ?? createdAt
+    }
+
     var hasVisibleActivity: Bool {
         !entries.isEmpty || activeThreadID != nil || status != .stopped
     }
@@ -293,6 +301,7 @@ final class CodexAgentSession: ObservableObject, Identifiable {
         processManager: CodexProcessManager? = nil
     ) {
         self.id = id
+        self.createdAt = Date()
         self.title = title
         self.accentTheme = accentTheme
         self.homeManager = homeManager ?? CodexHomeManager()
@@ -685,8 +694,11 @@ final class CodexAgentSession: ObservableObject, Identifiable {
         case "item/agentMessage/delta":
             let itemID = CodexJSON.string(params["itemId"]) ?? UUID().uuidString
             let delta = CodexJSON.string(params["delta"]) ?? ""
+            let wasComposing = progressStage == .composing
             progressStage = .composing
-            appendActivityStatusLine("Writing the response")
+            if !wasComposing {
+                appendActivityStatusLine("Writing the response")
+            }
             appendAssistantDelta(itemID: itemID, delta: delta)
         case "item/started":
             if blockForbiddenCommandIfNeeded(params["item"]) {
@@ -1708,7 +1720,8 @@ final class CodexAgentSession: ObservableObject, Identifiable {
             "Task Title Cleanup",
             "Task Title Stability",
             "Task Title Ordering",
-            "Task Status Wording"
+            "Task Status Wording",
+            "Lozenge Sizing"
         ]
         return stableTitles.contains(title)
     }
@@ -1935,6 +1948,8 @@ final class CodexAgentSession: ObservableObject, Identifiable {
         let directTitleRules: [(pattern: String, title: String)] = [
             (#"(?i)\b(?:see\s+(?:the\s+)?issue\s+here|look\s+at\s+this|fix\s+this)\b.*\b(?:OpenClickyLog|NSXPCDecoder|ViewBridge|unifiedReasons|NSXPCConnection)\b"#, "Log Issue Review"),
             (#"(?i)\b(?:OpenClickyLog|NSXPCDecoder|NSXPCInterface|NSXPCConnection|ViewBridge|NSViewBridgeError|Unable to obtain a task name port right|nw_protocol_instance|nw_read_request_report|unifiedReasons)\b"#, "Log Issue Review"),
+            (#"(?i)\b(?:lozenge|pill|caption|label)\b.*\b(?:too\s+long|wide|overflow|cut\s*off|trim|shorter|shorten|compact)\b"#, "Lozenge Sizing"),
+            (#"(?i)\b(?:too\s+long|wide|overflow|cut\s*off|trim|shorter|shorten|compact)\b.*\b(?:lozenge|pill|caption|label)\b"#, "Lozenge Sizing"),
             (#"(?i)\b(?:whole|full)\s+(?:task\s+)?names?\b"#, "Task Status Wording"),
             (#"(?i)\bshort\s+(?:version|task\s+name|name)\b"#, "Task Status Wording"),
             (#"(?i)\b(?:read(?:ing)?\s+out|speak(?:ing)?|say(?:ing)?)\b.*\b(?:whole|full|long|raw)\b.*\b(?:task\s+)?(?:name|title|request)\b"#, "Task Title Cleanup"),
@@ -1950,6 +1965,14 @@ final class CodexAgentSession: ObservableObject, Identifiable {
         ]
         for rule in directTitleRules where title.range(of: rule.pattern, options: .regularExpression) != nil {
             return rule.title
+        }
+
+        let attachmentPathPatterns = [
+            #"(?i)^/.*?\.(?:png|jpe?g|jpeg|heic|webp|gif|pdf|mov|mp4|m4v)\b"#,
+            #"(?i)(?:^|\s)/(?:Users|var|tmp|private|Applications|Volumes)/\S+"#
+        ]
+        for pattern in attachmentPathPatterns {
+            title = title.replacingOccurrences(of: pattern, with: " ", options: .regularExpression)
         }
 
         let fillerPatterns = [

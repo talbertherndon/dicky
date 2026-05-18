@@ -5,7 +5,7 @@
 //  Top-of-screen capture surface for OpenClicky. It anchors beneath the
 //  MacBook Pro notch when the built-in display is present, otherwise beneath
 //  the active main display while docked. This replaces the old cursor-local
-//  Ctrl+Ctrl text interface and mirrors Clicky's top listening affordance.
+//  older floating text interface and mirrors Clicky's top listening affordance.
 //
 
 import AppKit
@@ -101,11 +101,17 @@ final class OpenClickyNotchCaptureWindowManager {
     private var mainHostingView: NSHostingView<OpenClickyNotchPanelView>?
     private var mainPanelGlobalClickMonitor: Any?
     private var mainPanelLocalClickMonitor: Any?
+    private var mainPanelEscapeKeyMonitor: Any?
+    private var mainPanelContentSizeObserver: NSObjectProtocol?
     private var isMainPanelPinned = false
     private var activeMode: ActiveMode?
     private var persistentAccentColor = NSColor(calibratedRed: 0.20, green: 0.50, blue: 1.00, alpha: 1.0)
     private var persistentSubmitText: ((String) -> Void)?
     private var persistentShowMainPanel: (() -> Void)?
+    private var anchorScreenOverride: NSScreen?
+    private var collapsedHoverProbeTimer: Timer?
+    private var foregroundAppActivationObserver: NSObjectProtocol?
+    private var foregroundAppIcon: NSImage?
 
     // AppKit window frames are in points, not pixels. Keep these as real
     // point sizes; do not divide by backingScaleFactor or the content clips on
@@ -113,15 +119,53 @@ final class OpenClickyNotchCaptureWindowManager {
     private static let expandedPanelWidth: CGFloat = 520
     private static let mainPanelWidth: CGFloat = 430
     private static let mainPanelHeight: CGFloat = 620
-    private static let collapsedPanelWidth: CGFloat = 188
-    private static let collapsedPanelHeight: CGFloat = 18
+    private static let collapsedPanelWidth: CGFloat = 64
+    private static let statusLozengeHeight: CGFloat = 38
+    private static let collapsedPanelHeight: CGFloat = statusLozengeHeight
     private static let expandedHandleWidth: CGFloat = 96
     private static let expandedHandleHeight: CGFloat = 10
     private static let textPanelHeight: CGFloat = 226
-    private static let voicePanelHeight: CGFloat = 64
+    private static let mainPanelMaximumHeight: CGFloat = 720
+    private static let voicePanelSurroundingNotchWidth: CGFloat = 244
+    private static let voicePanelHeight: CGFloat = statusLozengeHeight
     private static let topGap: CGFloat = 0
     private static let mainPanelGapBelowCapture: CGFloat = 10
     private static let screenEdgePadding: CGFloat = 12
+    private static let escapeKeyCode: UInt16 = 53
+
+    init() {
+        mainPanelContentSizeObserver = NotificationCenter.default.addObserver(
+            forName: .clickyPanelContentSizeDidChange,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.resizeVisibleMainPanelToCurrentContent(animated: true)
+            }
+        }
+        foregroundAppIcon = Self.detectForegroundAppIcon()
+        foregroundAppActivationObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didActivateApplicationNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            Task { @MainActor [weak self] in
+                guard let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else {
+                    return
+                }
+                self?.updateForegroundAppIcon(from: app)
+            }
+        }
+    }
+
+    deinit {
+        if let observer = mainPanelContentSizeObserver {
+            NotificationCenter.default.removeObserver(observer)
+        }
+        if let observer = foregroundAppActivationObserver {
+            NSWorkspace.shared.notificationCenter.removeObserver(observer)
+        }
+    }
 
     func showPersistentPill(
         companionManager: CompanionManager,
@@ -139,9 +183,14 @@ final class OpenClickyNotchCaptureWindowManager {
         }
         contentView?.configureCollapsed(
             accentColor: accentColor,
-            expand: persistentShowMainPanel ?? {},
+            foregroundAppIcon: foregroundAppIcon,
+            expand: { [weak self] in
+                self?.pinAnchorScreenToPointerIfNeeded()
+                self?.persistentShowMainPanel?()
+            },
             dismiss: { [weak self] in self?.collapseToPill(accentColor: accentColor, submitText: submitText) }
         )
+        startCollapsedHoverProbe()
         showPanel(activating: false, width: Self.collapsedPanelWidth, height: Self.collapsedPanelHeight)
     }
 
@@ -162,14 +211,16 @@ final class OpenClickyNotchCaptureWindowManager {
             }
         case .listening, .processing, .responding:
             guard activeMode != .text else { return }
+            stopCollapsedHoverProbe()
             activeMode = .voice
-            ensureCaptureContentView(width: Self.voicePanelWidth(for: Self.preferredAnchorScreen()), height: Self.voicePanelHeight)
+            ensureCaptureContentView(width: Self.voicePanelWidth(for: preferredAnchorScreen()), height: Self.voicePanelHeight)
             contentView?.configureVoice(
                 phase: voicePhase,
                 audioPowerLevel: audioPowerLevel,
-                accentColor: Self.nsAccentColor(for: nil)
+                accentColor: Self.nsAccentColor(for: nil),
+                foregroundAppIcon: foregroundAppIcon
             )
-            showPanel(activating: false, width: Self.voicePanelWidth(for: Self.preferredAnchorScreen()), height: Self.voicePanelHeight)
+            showPanel(activating: false, width: Self.voicePanelWidth(for: preferredAnchorScreen()), height: Self.voicePanelHeight)
         }
     }
 
@@ -181,12 +232,18 @@ final class OpenClickyNotchCaptureWindowManager {
     func hide() {
         panel?.orderOut(nil)
         hideMainPanel()
+        stopCollapsedHoverProbe()
         activeMode = nil
+        anchorScreenOverride = nil
     }
 
     private func hideMainPanel() {
         mainPanel?.orderOut(nil)
         removeMainPanelClickOutsideMonitors()
+        removeMainPanelEscapeKeyMonitor()
+        if activeMode == .collapsedText {
+            startCollapsedHoverProbe()
+        }
     }
 
     private func collapseToPill(accentColor: NSColor, submitText: @escaping (String) -> Void) {
@@ -194,15 +251,23 @@ final class OpenClickyNotchCaptureWindowManager {
         ensureCaptureContentView(width: Self.collapsedPanelWidth, height: Self.collapsedPanelHeight)
         contentView?.configureCollapsed(
             accentColor: accentColor,
-            expand: persistentShowMainPanel ?? { [weak self] in
-                self?.expandTextInput(accentColor: accentColor, submitText: submitText)
+            foregroundAppIcon: foregroundAppIcon,
+            expand: { [weak self] in
+                self?.pinAnchorScreenToPointerIfNeeded()
+                if let showMainPanel = self?.persistentShowMainPanel {
+                    showMainPanel()
+                } else {
+                    self?.expandTextInput(accentColor: accentColor, submitText: submitText)
+                }
             },
             dismiss: { [weak self] in self?.collapseToPill(accentColor: accentColor, submitText: submitText) }
         )
+        startCollapsedHoverProbe()
         showPanel(activating: false, width: Self.collapsedPanelWidth, height: Self.collapsedPanelHeight)
     }
 
     private func expandTextInput(accentColor: NSColor, submitText: @escaping (String) -> Void) {
+        stopCollapsedHoverProbe()
         activeMode = .text
         persistentAccentColor = accentColor
         persistentSubmitText = submitText
@@ -216,15 +281,18 @@ final class OpenClickyNotchCaptureWindowManager {
         contentView?.focusTextField()
     }
 
-    func showMainInterfacePanel(companionManager: CompanionManager) {
-        showMainPanel(companionManager: companionManager)
+    func showMainInterfacePanel(companionManager: CompanionManager, focusedAgentSessionID: UUID? = nil) {
+        showMainPanel(companionManager: companionManager, focusedAgentSessionID: focusedAgentSessionID)
     }
 
-    private func showMainPanel(companionManager: CompanionManager) {
+    private func showMainPanel(companionManager: CompanionManager, focusedAgentSessionID: UUID? = nil) {
+        stopCollapsedHoverProbe()
+        pinAnchorScreenToPointerIfNeeded()
         ensureMainPanel()
         let notchPanelView = OpenClickyNotchPanelView(
             companionManager: companionManager,
             isPanelPinned: isMainPanelPinned,
+            initialFocusedAgentSessionID: focusedAgentSessionID,
             setPanelPinned: { [weak self] isPinned in
                 self?.setMainPanelPinned(isPinned)
             },
@@ -244,7 +312,8 @@ final class OpenClickyNotchCaptureWindowManager {
         }
         mainPanel?.contentView = hostingView
         mainHostingView = hostingView
-        showMainPanelWindow(activating: true, width: Self.mainPanelWidth, height: Self.mainPanelHeight)
+        let fittingHeight = preferredMainPanelHeight()
+        showMainPanelWindow(activating: true, width: Self.mainPanelWidth, height: fittingHeight)
     }
 
     private func showPanel(activating: Bool, width: CGFloat, height: CGFloat) {
@@ -267,6 +336,7 @@ final class OpenClickyNotchCaptureWindowManager {
             mainPanel?.orderFrontRegardless()
         }
         mainPanel?.orderFrontRegardless()
+        installMainPanelEscapeKeyMonitor()
         installMainPanelClickOutsideMonitors()
     }
 
@@ -313,6 +383,24 @@ final class OpenClickyNotchCaptureWindowManager {
         if let monitor = mainPanelLocalClickMonitor {
             NSEvent.removeMonitor(monitor)
             mainPanelLocalClickMonitor = nil
+        }
+    }
+
+    private func installMainPanelEscapeKeyMonitor() {
+        removeMainPanelEscapeKeyMonitor()
+        mainPanelEscapeKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown]) { [weak self] event in
+            guard event.keyCode == Self.escapeKeyCode else { return event }
+            Task { @MainActor [weak self] in
+                self?.hideMainPanel()
+            }
+            return nil
+        }
+    }
+
+    private func removeMainPanelEscapeKeyMonitor() {
+        if let monitor = mainPanelEscapeKeyMonitor {
+            NSEvent.removeMonitor(monitor)
+            mainPanelEscapeKeyMonitor = nil
         }
     }
 
@@ -411,20 +499,68 @@ final class OpenClickyNotchCaptureWindowManager {
         positionMainPanel(size: size)
     }
 
+    private func resizeVisibleMainPanelToCurrentContent(animated: Bool) {
+        guard let mainPanel, mainPanel.isVisible else { return }
+        let height = preferredMainPanelHeight()
+        let size = NSSize(width: Self.mainPanelWidth, height: height)
+        let origin: NSPoint
+        if animated {
+            origin = NSPoint(
+                x: mainPanel.frame.origin.x,
+                y: mainPanel.frame.maxY - size.height
+            )
+        } else {
+            origin = mainPanelOrigin(for: size)
+        }
+        let targetFrame = NSRect(origin: origin, size: size)
+
+        guard targetFrame.integral != mainPanel.frame.integral else { return }
+
+        let updateHostingFrame = { [weak self] in
+            self?.mainHostingView?.frame = NSRect(origin: .zero, size: size)
+            self?.mainHostingView?.needsLayout = true
+        }
+
+        if animated {
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = 0.18
+                context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+                mainPanel.animator().setFrame(targetFrame, display: true)
+            } completionHandler: {
+                updateHostingFrame()
+            }
+        } else {
+            mainPanel.setFrame(targetFrame, display: true, animate: false)
+            updateHostingFrame()
+        }
+    }
+
+    private func preferredMainPanelHeight() -> CGFloat {
+        guard let fittingHeight = mainHostingView?.fittingSize.height, fittingHeight > 0 else {
+            return Self.mainPanelHeight
+        }
+        return min(max(ceil(fittingHeight), 260), Self.mainPanelMaximumHeight)
+    }
+
     private func repositionMainPanelIfVisible() {
         guard let mainPanel, mainPanel.isVisible else { return }
         positionMainPanel(size: mainPanel.frame.size)
     }
 
     private func positionPanel(size: NSSize) {
-        guard let panel, let screen = Self.preferredAnchorScreen() else { return }
+        guard let panel, let screen = preferredAnchorScreen() else { return }
         let x = Self.centeredX(for: size, on: screen)
         let y = screen.frame.maxY - size.height - Self.topGap
         panel.setFrameOrigin(NSPoint(x: x, y: y))
     }
 
     private func positionMainPanel(size: NSSize) {
-        guard let mainPanel, let screen = Self.preferredAnchorScreen() else { return }
+        guard let mainPanel else { return }
+        mainPanel.setFrameOrigin(mainPanelOrigin(for: size))
+    }
+
+    private func mainPanelOrigin(for size: NSSize) -> NSPoint {
+        guard let screen = preferredAnchorScreen() else { return mainPanel?.frame.origin ?? .zero }
         let fullFrame = screen.frame
         let visibleFrame = screen.visibleFrame
         let usableFrame = visibleFrame.isEmpty ? fullFrame : visibleFrame
@@ -433,7 +569,64 @@ final class OpenClickyNotchCaptureWindowManager {
         let preferredY = screen.frame.maxY - captureHeight - Self.mainPanelGapBelowCapture - size.height
         let minY = usableFrame.minY + Self.screenEdgePadding
         let y = max(preferredY, minY)
-        mainPanel.setFrameOrigin(NSPoint(x: x, y: y))
+        return NSPoint(x: x, y: y)
+    }
+
+
+    private func preferredAnchorScreen() -> NSScreen? {
+        if let override = anchorScreenOverride, NSScreen.screens.contains(where: { $0.displayID == override.displayID }) {
+            return override
+        }
+        anchorScreenOverride = nil
+        return Self.preferredAnchorScreen()
+    }
+
+    private func pinAnchorScreenToPointerIfNeeded() {
+        let mouseLocation = NSEvent.mouseLocation
+        guard let screen = NSScreen.screens.first(where: { $0.frame.contains(mouseLocation) }) else { return }
+        anchorScreenOverride = screen
+    }
+
+    private func startCollapsedHoverProbe() {
+        guard collapsedHoverProbeTimer == nil else { return }
+        let timer = Timer(timeInterval: 0.08, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.probeCollapsedNotchHover()
+            }
+        }
+        collapsedHoverProbeTimer = timer
+        RunLoop.main.add(timer, forMode: .common)
+    }
+
+    private func stopCollapsedHoverProbe() {
+        collapsedHoverProbeTimer?.invalidate()
+        collapsedHoverProbeTimer = nil
+    }
+
+    private func probeCollapsedNotchHover() {
+        guard activeMode == .collapsedText, mainPanel?.isVisible != true else {
+            stopCollapsedHoverProbe()
+            return
+        }
+        let mouseLocation = NSEvent.mouseLocation
+        guard let hoveredScreen = NSScreen.screens.first(where: { Self.notchHoverRegion(on: $0).contains(mouseLocation) }) else { return }
+
+        if anchorScreenOverride?.displayID != hoveredScreen.displayID {
+            anchorScreenOverride = hoveredScreen
+            resizeAndReposition(width: Self.collapsedPanelWidth, height: Self.collapsedPanelHeight)
+        }
+        persistentShowMainPanel?()
+    }
+
+    private static func notchHoverRegion(on screen: NSScreen) -> NSRect {
+        let width = max(collapsedPanelWidth + 52, 188)
+        let height = max(collapsedPanelHeight + 24, 36)
+        return NSRect(
+            x: screen.frame.midX - width / 2,
+            y: screen.frame.maxY - height - topGap,
+            width: width,
+            height: height
+        )
     }
 
     private static func centeredX(for size: NSSize, on screen: NSScreen) -> CGFloat {
@@ -452,14 +645,17 @@ final class OpenClickyNotchCaptureWindowManager {
     }
 
     private static func voicePanelWidth(for screen: NSScreen?) -> CGFloat {
-        guard let screen else { return 620 }
-        let available = max(320, screen.visibleFrame.width - 160)
-        return min(max(available * 0.72, 520), 920)
+        guard let screen else { return Self.voicePanelSurroundingNotchWidth }
+        let maximumSurroundingNotchWidth = max(300, screen.visibleFrame.width - 48)
+        return min(Self.voicePanelSurroundingNotchWidth, maximumSurroundingNotchWidth)
     }
 
     private static func preferredAnchorScreen() -> NSScreen? {
         let screens = NSScreen.screens
 
+        if let builtInNotchScreen = screens.first(where: isLikelyBuiltInNotchScreen) {
+            return builtInNotchScreen
+        }
         if let keyWindow = NSApp.keyWindow,
            !(keyWindow is OpenClickyNotchCapturePanel),
            let keyWindowScreen = keyWindow.screen {
@@ -477,7 +673,7 @@ final class OpenClickyNotchCaptureWindowManager {
         if let main = NSScreen.main {
             return main
         }
-        return screens.first(where: isLikelyBuiltInNotchScreen) ?? screens.first
+        return screens.first
     }
 
     private static func isLikelyBuiltInNotchScreen(_ screen: NSScreen) -> Bool {
@@ -493,6 +689,18 @@ final class OpenClickyNotchCaptureWindowManager {
             safeTopInset = 0
         }
         return looksBuiltIn && (safeTopInset > 0 || visibleTopInset > 0)
+    }
+
+    private func updateForegroundAppIcon(from app: NSRunningApplication) {
+        guard app.bundleIdentifier != Bundle.main.bundleIdentifier else { return }
+        foregroundAppIcon = app.icon ?? NSWorkspace.shared.icon(forFile: app.bundleURL?.path ?? "")
+        contentView?.updateForegroundAppIcon(foregroundAppIcon)
+    }
+
+    private static func detectForegroundAppIcon() -> NSImage? {
+        guard let app = NSWorkspace.shared.frontmostApplication else { return nil }
+        guard app.bundleIdentifier != Bundle.main.bundleIdentifier else { return nil }
+        return app.icon ?? NSWorkspace.shared.icon(forFile: app.bundleURL?.path ?? "")
     }
 
     private static func nsAccentColor(for theme: ClickyAccentTheme?) -> NSColor {
@@ -522,7 +730,7 @@ private final class OpenClickyNotchCaptureRootView: NSView, NSTextFieldDelegate 
     private let shellView = OpenClickyRoundedView(cornerRadius: 24)
     private let textStack = NSStackView()
     private let voiceStack = NSStackView()
-    private let titleLabel = NSTextField(labelWithString: "Ask from anywhere")
+    private let titleLabel = NSTextField(labelWithString: "Ask OpenClicky")
     private let subtitleLabel = NSTextField(labelWithString: "Menu-bar notch surface, existing fast voice stack, local agent handoff.")
     private let inputShell = OpenClickyRoundedView(cornerRadius: 21)
     private let textField = NSTextField()
@@ -530,7 +738,10 @@ private final class OpenClickyNotchCaptureRootView: NSView, NSTextFieldDelegate 
     private let actionStack = NSStackView()
     private let voiceTitleLabel = NSTextField(labelWithString: "Listening")
     private let voiceSubtitleLabel = NSTextField(labelWithString: "Release the shortcut to send this turn.")
+    private let voiceNotchSpacer = NSView()
     private let waveformView = OpenClickyNotchWaveformNSView()
+    private let collapsedAppIconView = NSImageView()
+    private let voiceAppIconView = NSImageView()
     private var mode: Mode = .voice
     private var submitText: ((String) -> Void)?
     private var dismiss: (() -> Void)?
@@ -549,17 +760,23 @@ private final class OpenClickyNotchCaptureRootView: NSView, NSTextFieldDelegate 
         configureText(accentColor: accentColor, submitText: { _ in }, dismiss: {})
     }
 
-    func configureCollapsed(accentColor: NSColor, expand: @escaping () -> Void, dismiss: @escaping () -> Void) {
+    func configureCollapsed(accentColor: NSColor, foregroundAppIcon: NSImage?, expand: @escaping () -> Void, dismiss: @escaping () -> Void) {
         mode = .collapsed
         self.accentColor = accentColor
         self.expand = expand
         self.dismiss = dismiss
         textStack.isHidden = true
         voiceStack.isHidden = true
-        shellView.isHidden = true
-        notchHandle.isHidden = false
-        notchHandle.fillColor = NSColor.black.withAlphaComponent(0.94)
-        notchHandle.borderColor = accentColor.withAlphaComponent(0.32)
+        collapsedAppIconView.isHidden = false
+        notchHandle.isHidden = true
+        shellView.isHidden = false
+        shellView.cornerRadius = 17
+        shellView.fillColor = NSColor.black.withAlphaComponent(0.94)
+        shellView.borderColor = .clear
+        shellView.roundedShadowColor = NSColor.black.withAlphaComponent(0.26)
+        shellView.roundedShadowBlurRadius = 10
+        shellView.roundedShadowOffset = NSSize(width: 0, height: -4)
+        updateForegroundAppIcon(foregroundAppIcon)
         needsDisplay = true
     }
 
@@ -569,30 +786,49 @@ private final class OpenClickyNotchCaptureRootView: NSView, NSTextFieldDelegate 
         self.submitText = submitText
         self.dismiss = dismiss
         self.expand = nil
+        notchHandle.isHidden = true
         shellView.isHidden = false
         textStack.isHidden = false
         voiceStack.isHidden = true
+        collapsedAppIconView.isHidden = true
         shellView.cornerRadius = 24
         shellView.borderColor = NSColor.white.withAlphaComponent(0.085)
+        shellView.roundedShadowColor = NSColor.black.withAlphaComponent(0.46)
+        shellView.roundedShadowBlurRadius = 16
+        shellView.roundedShadowOffset = NSSize(width: 0, height: -8)
         updateAccentColors()
         updateSuggestions()
         textField.stringValue = ""
         window?.makeFirstResponder(textField)
     }
 
-    func configureVoice(phase: OpenClickyNotchVoicePhase, audioPowerLevel: CGFloat, accentColor: NSColor) {
+    func configureVoice(phase: OpenClickyNotchVoicePhase, audioPowerLevel: CGFloat, accentColor: NSColor, foregroundAppIcon: NSImage?) {
         mode = .voice
         self.accentColor = accentColor
         expand = nil
+        notchHandle.isHidden = true
         shellView.isHidden = false
         textStack.isHidden = true
         voiceStack.isHidden = false
-        shellView.cornerRadius = 22
-        shellView.borderColor = accentColor.withAlphaComponent(0.28)
+        collapsedAppIconView.isHidden = true
+        shellView.cornerRadius = 17
+        shellView.fillColor = NSColor.black.withAlphaComponent(0.94)
+        shellView.borderColor = .clear
+        shellView.roundedShadowColor = NSColor.black.withAlphaComponent(0.30)
+        shellView.roundedShadowBlurRadius = 10
+        shellView.roundedShadowOffset = NSSize(width: 0, height: -4)
         updateAccentColors()
         updateVoiceLabels(for: phase)
+        updateForegroundAppIcon(foregroundAppIcon)
         waveformView.audioPowerLevel = audioPowerLevel
         waveformView.accentColor = accentColor
+    }
+
+    func updateForegroundAppIcon(_ icon: NSImage?) {
+        collapsedAppIconView.image = icon
+        voiceAppIconView.image = icon
+        collapsedAppIconView.isHidden = mode != .collapsed || icon == nil
+        voiceAppIconView.isHidden = mode != .voice || icon == nil
     }
 
     func updateAudioPowerLevel(_ audioPowerLevel: CGFloat) {
@@ -645,7 +881,10 @@ private final class OpenClickyNotchCaptureRootView: NSView, NSTextFieldDelegate 
         shellView.roundedShadowBlurRadius = 16
         shellView.roundedShadowOffset = NSSize(width: 0, height: -8)
         addSubview(shellView)
+        let shellClickRecognizer = NSClickGestureRecognizer(target: self, action: #selector(handleCollapsedClick(_:)))
+        shellView.addGestureRecognizer(shellClickRecognizer)
 
+        configureForegroundAppIconViews()
         configureTextStack()
         configureVoiceStack()
 
@@ -655,10 +894,28 @@ private final class OpenClickyNotchCaptureRootView: NSView, NSTextFieldDelegate 
             notchHandle.widthAnchor.constraint(equalToConstant: 96),
             notchHandle.heightAnchor.constraint(equalToConstant: 10),
 
-            shellView.topAnchor.constraint(equalTo: notchHandle.bottomAnchor, constant: -1),
+            shellView.topAnchor.constraint(equalTo: topAnchor),
             shellView.leadingAnchor.constraint(equalTo: leadingAnchor),
             shellView.trailingAnchor.constraint(equalTo: trailingAnchor),
             shellView.bottomAnchor.constraint(equalTo: bottomAnchor)
+        ])
+    }
+
+    private func configureForegroundAppIconViews() {
+        for imageView in [collapsedAppIconView, voiceAppIconView] {
+            imageView.translatesAutoresizingMaskIntoConstraints = false
+            imageView.imageScaling = .scaleProportionallyUpOrDown
+            imageView.wantsLayer = true
+            imageView.layer?.cornerRadius = 4
+            imageView.layer?.masksToBounds = true
+            imageView.isHidden = true
+        }
+        shellView.addSubview(collapsedAppIconView)
+        NSLayoutConstraint.activate([
+            collapsedAppIconView.widthAnchor.constraint(equalToConstant: 24),
+            collapsedAppIconView.heightAnchor.constraint(equalToConstant: 24),
+            collapsedAppIconView.centerXAnchor.constraint(equalTo: shellView.centerXAnchor),
+            collapsedAppIconView.centerYAnchor.constraint(equalTo: shellView.centerYAnchor)
         ])
     }
 
@@ -766,29 +1023,42 @@ private final class OpenClickyNotchCaptureRootView: NSView, NSTextFieldDelegate 
     private func configureVoiceStack() {
         voiceStack.orientation = .horizontal
         voiceStack.alignment = .centerY
-        voiceStack.spacing = 10
+        voiceStack.spacing = 8
         voiceStack.translatesAutoresizingMaskIntoConstraints = false
         shellView.addSubview(voiceStack)
 
         let copyStack = NSStackView()
         copyStack.orientation = .vertical
-        copyStack.alignment = .leading
-        copyStack.spacing = 3
-        voiceTitleLabel.font = .systemFont(ofSize: 15, weight: .heavy)
+        copyStack.alignment = .trailing
+        copyStack.spacing = 0
+        copyStack.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        copyStack.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        voiceTitleLabel.font = .systemFont(ofSize: 12, weight: .heavy)
         voiceTitleLabel.textColor = NSColor.white.withAlphaComponent(0.96)
-        voiceSubtitleLabel.font = .systemFont(ofSize: 9, weight: .semibold)
+        voiceSubtitleLabel.font = .systemFont(ofSize: 8, weight: .semibold)
         voiceSubtitleLabel.textColor = NSColor.white.withAlphaComponent(0.62)
+        voiceSubtitleLabel.isHidden = true
+        voiceAppIconView.setContentHuggingPriority(.required, for: .horizontal)
+        voiceAppIconView.setContentCompressionResistancePriority(.required, for: .horizontal)
         waveformView.translatesAutoresizingMaskIntoConstraints = false
+        waveformView.setContentHuggingPriority(.required, for: .horizontal)
+        waveformView.setContentCompressionResistancePriority(.required, for: .horizontal)
+        voiceStack.addArrangedSubview(voiceAppIconView)
         copyStack.addArrangedSubview(voiceTitleLabel)
         copyStack.addArrangedSubview(voiceSubtitleLabel)
-        copyStack.addArrangedSubview(waveformView)
         voiceStack.addArrangedSubview(copyStack)
-        waveformView.widthAnchor.constraint(equalToConstant: 210).isActive = true
-        waveformView.heightAnchor.constraint(equalToConstant: 12).isActive = true
+        voiceStack.addArrangedSubview(voiceNotchSpacer)
+        voiceStack.addArrangedSubview(waveformView)
+        voiceAppIconView.widthAnchor.constraint(equalToConstant: 22).isActive = true
+        voiceAppIconView.heightAnchor.constraint(equalToConstant: 22).isActive = true
+        copyStack.widthAnchor.constraint(equalToConstant: 62).isActive = true
+        voiceNotchSpacer.widthAnchor.constraint(equalToConstant: 64).isActive = true
+        waveformView.widthAnchor.constraint(equalToConstant: 50).isActive = true
+        waveformView.heightAnchor.constraint(equalToConstant: 10).isActive = true
 
         NSLayoutConstraint.activate([
-            voiceStack.leadingAnchor.constraint(equalTo: shellView.leadingAnchor, constant: 12),
-            voiceStack.trailingAnchor.constraint(equalTo: shellView.trailingAnchor, constant: -12),
+            voiceStack.leadingAnchor.constraint(equalTo: shellView.leadingAnchor, constant: 10),
+            voiceStack.trailingAnchor.constraint(equalTo: shellView.trailingAnchor, constant: -10),
             voiceStack.centerYAnchor.constraint(equalTo: shellView.centerYAnchor)
         ])
         voiceStack.isHidden = true

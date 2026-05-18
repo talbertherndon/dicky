@@ -272,12 +272,14 @@ nonisolated final class CodexProcessManager: @unchecked Sendable {
         guard let data = line.data(using: .utf8) else { return }
         do {
             guard let message = try JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
-            OpenClickyMessageLogStore.shared.append(
-                lane: "agent",
-                direction: "incoming",
-                event: "codex.rpc.message",
-                fields: Self.summarizedMessageFieldsForLog(message)
-            )
+            if Self.shouldLogRPCMessage(message) {
+                OpenClickyMessageLogStore.shared.append(
+                    lane: "agent",
+                    direction: "incoming",
+                    event: "codex.rpc.message",
+                    fields: Self.summarizedMessageFieldsForLog(message)
+                )
+            }
             if let id = CodexJSON.int(message["id"]) {
                 let continuation = pending.removeValue(forKey: id)
                 if let error = CodexJSON.dictionary(message["error"]) {
@@ -354,6 +356,19 @@ nonisolated final class CodexProcessManager: @unchecked Sendable {
             fields["kind"] = "unknown"
         }
         return fields
+    }
+
+    private static func shouldLogRPCMessage(_ message: [String: Any]) -> Bool {
+        guard let method = CodexJSON.string(message["method"]) else { return true }
+
+        switch method {
+        case "item/agentMessage/delta",
+             "command/exec/outputDelta",
+             "item/commandExecution/outputDelta":
+            return false
+        default:
+            return true
+        }
     }
 
     private static func summarizedNotificationParamsForLog(method: String, params: [String: Any]) -> [String: Any] {

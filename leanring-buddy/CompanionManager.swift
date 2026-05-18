@@ -732,7 +732,7 @@ final class CompanionManager: ObservableObject {
     /// This lets a later referential agent request ("on it", "do that")
     /// resolve to what the user was just talking about, regardless of
     /// whether the prior turn came from push-to-talk, Realtime voice, or
-    /// the double-Control instant text popup.
+    /// the panel's instant text entry.
     private var lastVoiceUserTranscript: String?
     private var lastVoiceUserTranscriptAt: Date?
     private static let pendingAgentVoiceFollowUpTTL: TimeInterval = 90
@@ -808,7 +808,7 @@ final class CompanionManager: ObservableObject {
     private var lastNarratedAgentOutcomeBySessionID: [UUID: String] = [:]
 
     private var shortcutTransitionCancellable: AnyCancellable?
-    private var controlDoubleTapCancellable: AnyCancellable?
+    private var shiftDoubleTapCancellable: AnyCancellable?
     private var voiceStateCancellable: AnyCancellable?
     private var audioPowerCancellable: AnyCancellable?
     private var externalControlBridgeServer: OpenClickyExternalControlBridgeServer?
@@ -880,7 +880,7 @@ final class CompanionManager: ObservableObject {
     init(runtimeMode: OpenClickyCompanionRuntimeMode = .menuBar) {
         self.runtimeMode = runtimeMode
 
-        let initialAgentSession = CodexAgentSession(title: "Agent 1", accentTheme: .blue)
+        let initialAgentSession = CodexAgentSession(title: "Ask Agent", accentTheme: .blue)
         codexAgentSessions = [initialAgentSession]
         activeCodexAgentSessionID = initialAgentSession.id
         OpenClickyMessageLogStore.shared.append(
@@ -2095,11 +2095,11 @@ final class CompanionManager: ObservableObject {
                 self?.handleShortcutTransition(transition)
             }
 
-        controlDoubleTapCancellable = globalPushToTalkShortcutMonitor
-            .controlDoubleTapPublisher
+        shiftDoubleTapCancellable = globalPushToTalkShortcutMonitor
+            .shiftDoubleTapPublisher
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in
-                self?.showTextModeInputAtCursor()
+                self?.showMainOpenClickyPanelFromShortcut()
             }
     }
 
@@ -2175,10 +2175,9 @@ final class CompanionManager: ObservableObject {
 
     @discardableResult
     func createAndSelectNewCodexAgentSession(title: String? = nil, accentTheme: ClickyAccentTheme? = nil) -> CodexAgentSession {
-        let nextIndex = codexAgentSessions.count + 1
         let resolvedAccentTheme = accentTheme ?? Self.nextAgentDockAccentTheme(existingCount: codexAgentSessions.count)
         let session = CodexAgentSession(
-            title: title ?? "Agent \(nextIndex)",
+            title: title ?? "Ask Agent",
             accentTheme: resolvedAccentTheme
         )
         codexAgentSessions.append(session)
@@ -4896,6 +4895,14 @@ final class CompanionManager: ObservableObject {
 
     func showQuickTextInputFromMenuBar() {
         showTextModeInputAtCursor()
+    }
+
+    private func showMainOpenClickyPanelFromShortcut() {
+        guard allPermissionsGranted else { return }
+        guard !buddyDictationManager.isKeyboardShortcutSessionActiveOrFinalizing else { return }
+
+        textModeWindowManager.hide()
+        notchCaptureWindowManager.showMainInterfacePanel(companionManager: self)
     }
 
     private func showTextModeInputAtCursor(activationPoint: CGPoint? = nil) {
@@ -8631,10 +8638,9 @@ final class CompanionManager: ObservableObject {
         ensureCursorOverlayVisibleForAgentTask()
 
         let dockItemID = UUID()
-        // Build a richer acknowledgement that echoes the requirement back
-        // so the user immediately hears/sees that the app understood what
-        // they asked for and what's about to happen next. Falls back to the
-        // caller's override (e.g., the explicit-agent path) when supplied.
+        // Keep the spoken handoff intentionally generic. The dock still gets
+        // the compact task title, but voice should not read the task name
+        // back when launching an agent.
         let acknowledgement = acknowledgement ?? Self.acknowledgementForAgentInstruction(instruction)
         let dockScreen = agentDockTargetScreen()
 
@@ -8853,6 +8859,8 @@ final class CompanionManager: ObservableObject {
         let directTitleRules: [(pattern: String, title: String)] = [
             (#"(?i)\b(?:see\s+(?:the\s+)?issue\s+here|look\s+at\s+this|fix\s+this)\b.*\b(?:OpenClickyLog|NSXPCDecoder|ViewBridge|unifiedReasons|NSXPCConnection)\b"#, "Log Issue Review"),
             (#"(?i)\b(?:OpenClickyLog|NSXPCDecoder|NSXPCInterface|NSXPCConnection|ViewBridge|NSViewBridgeError|Unable to obtain a task name port right|nw_protocol_instance|nw_read_request_report|unifiedReasons)\b"#, "Log Issue Review"),
+            (#"(?i)\b(?:lozenge|pill|caption|label)\b.*\b(?:too\s+long|wide|overflow|cut\s*off|trim|shorter|shorten|compact)\b"#, "Lozenge Sizing"),
+            (#"(?i)\b(?:too\s+long|wide|overflow|cut\s*off|trim|shorter|shorten|compact)\b.*\b(?:lozenge|pill|caption|label)\b"#, "Lozenge Sizing"),
             (#"(?i)\b(?:whole|full)\s+(?:task\s+)?names?\b"#, "Task Status Wording"),
             (#"(?i)\bshort\s+(?:version|task\s+name|name)\b"#, "Task Status Wording"),
             (#"(?i)\b(?:read(?:ing)?\s+out|speak(?:ing)?|say(?:ing)?)\b.*\b(?:whole|full|long|raw)\b.*\b(?:task\s+)?(?:name|title|request)\b"#, "Task Title Cleanup"),
@@ -8868,6 +8876,14 @@ final class CompanionManager: ObservableObject {
         ]
         for rule in directTitleRules where title.range(of: rule.pattern, options: .regularExpression) != nil {
             return rule.title
+        }
+
+        let attachmentPathPatterns = [
+            #"(?i)^/.*?\.(?:png|jpe?g|jpeg|heic|webp|gif|pdf|mov|mp4|m4v)\b"#,
+            #"(?i)(?:^|\s)/(?:Users|var|tmp|private|Applications|Volumes)/\S+"#
+        ]
+        for pattern in attachmentPathPatterns {
+            title = title.replacingOccurrences(of: pattern, with: " ", options: .regularExpression)
         }
 
         let fillerPatterns = [
@@ -8939,23 +8955,11 @@ final class CompanionManager: ObservableObject {
     }
 
     /// Build the spoken/displayed acknowledgement for a freshly invoked
-    /// agent task. Use the same compact task title shown in the dock so
-    /// OpenClicky confirms the job without reading the raw dictated request
-    /// back to the user.
-    private static func acknowledgementForAgentInstruction(_ instruction: String) -> String {
-        let title = shortAgentInstructionSummary(instruction)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !title.isEmpty, title != "Agent Task" else {
-            return "got it. starting an agent now."
-        }
-
-        let spokenTitle: String
-        if let first = title.first {
-            spokenTitle = String(first).lowercased() + title.dropFirst()
-        } else {
-            spokenTitle = title
-        }
-        return "got it — \(spokenTitle). starting an agent now."
+    /// agent task. Keep it generic so OpenClicky does not speak the task
+    /// name back to the user; the compact title remains visual-only in the
+    /// dock and task history.
+    private static func acknowledgementForAgentInstruction(_ _: String) -> String {
+        "got it — i’ll get on with that in the background."
     }
 
     private static func nextAgentDockAccentTheme(existingCount: Int) -> ClickyAccentTheme {
@@ -9669,15 +9673,13 @@ final class CompanionManager: ObservableObject {
     }
 
     func showTextFollowUpForAgentDockItem(_ itemID: UUID) {
-        guard let item = agentDockItems.first(where: { $0.id == itemID }),
-              let sessionID = item.sessionID else { return }
+        guard let sessionID = agentDockItems.first(where: { $0.id == itemID })?.sessionID else { return }
         selectCodexAgentSession(sessionID)
-        let submitText: (String) -> Void = { [weak self] submittedText in
-            self?.submitTextFollowUp(submittedText, toAgentSessionID: sessionID)
-        }
-
         textModeWindowManager.hide()
-        notchCaptureWindowManager.showTextInput(accentTheme: item.accentTheme, submitText: submitText)
+        notchCaptureWindowManager.showMainInterfacePanel(
+            companionManager: self,
+            focusedAgentSessionID: sessionID
+        )
     }
 
     func beginAgentDockDrag() {
@@ -9827,6 +9829,68 @@ final class CompanionManager: ObservableObject {
     private static func agentAttachmentKindLabel(for url: URL) -> String {
         let imageExtensions: Set<String> = ["png", "jpg", "jpeg", "gif", "heic", "webp", "tiff", "bmp"]
         return imageExtensions.contains(url.pathExtension.lowercased()) ? "Image" : "Document"
+    }
+
+    @discardableResult
+    func submitNewAgentTaskFromUI(_ prompt: String, source: String = "agent_new_task_prompt") -> CodexAgentSession? {
+        let trimmedPrompt = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedPrompt.isEmpty else { return nil }
+        let timing = beginRequestTiming(source: source, text: trimmedPrompt)
+        activeRequestTiming = timing
+        defer { activeRequestTiming = nil }
+
+        let executionStartedAt = markRequestExecutionStarted(
+            route: "agent.new_task",
+            timing: timing,
+            extra: [
+                "executor": "agent_mode",
+                "executionMethod": "CompanionManager.createAndLaunchCodexAgentSession",
+                "controller": "CompanionManager",
+                "source": source,
+                "instructionLength": trimmedPrompt.count
+            ]
+        )
+
+        let session = createAndLaunchCodexAgentSession(
+            title: Self.shortAgentInstructionSummary(trimmedPrompt),
+            prompt: trimmedPrompt,
+            includeScreenContext: Self.shouldAttachScreenContext(to: trimmedPrompt)
+        )
+        agentRequestTimingsBySessionID[session.id] = timing
+        agentExecutionStartDatesBySessionID[session.id] = executionStartedAt
+
+        OpenClickyMessageLogStore.shared.append(
+            lane: "agent",
+            direction: "outgoing",
+            event: "openclicky.agent_task.created",
+            fields: [
+                "executor": "agent_mode",
+                "executionMethod": "CompanionManager.createAndLaunchCodexAgentSession",
+                "controller": "CompanionManager",
+                "model": session.model,
+                "sessionID": session.id.uuidString,
+                "title": session.title,
+                "instruction": trimmedPrompt,
+                "requestID": timing.requestID,
+                "source": source
+            ]
+        )
+
+        markRequestCompleted(
+            route: "agent.new_task",
+            executionStartedAt: executionStartedAt,
+            timing: timing,
+            extra: [
+                "executor": "agent_mode",
+                "executionMethod": "CompanionManager.createAndLaunchCodexAgentSession",
+                "controller": "CompanionManager",
+                "source": source,
+                "sessionID": session.id.uuidString,
+                "title": session.title,
+                "model": session.model
+            ]
+        )
+        return session
     }
 
     func submitAgentPromptFromUI(_ prompt: String) {

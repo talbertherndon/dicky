@@ -14,15 +14,15 @@ import Foundation
 
 final class GlobalPushToTalkShortcutMonitor: ObservableObject {
     let shortcutTransitionPublisher = PassthroughSubject<BuddyPushToTalkShortcut.ShortcutTransition, Never>()
-    let controlDoubleTapPublisher = PassthroughSubject<CGPoint, Never>()
+    let shiftDoubleTapPublisher = PassthroughSubject<CGPoint, Never>()
 
     @Published private(set) var isActivationShortcutEnabled = true
 
     private var globalEventTap: CFMachPort?
     private var globalEventTapRunLoopSource: CFRunLoopSource?
-    private var isControlCurrentlyPressed = false
-    private var lastStandaloneControlTapDate: Date?
-    private let maximumControlDoubleTapInterval: TimeInterval = 0.42
+    private var isShiftCurrentlyPressed = false
+    private var lastStandaloneShiftTapDate: Date?
+    private let maximumShiftDoubleTapInterval: TimeInterval = 0.42
     /// Mutated exclusively from the CGEvent tap callback, which runs on
     /// `CFRunLoopGetMain()` and therefore always executes on the main thread.
     /// Published so the overlay can hide immediately on key release without
@@ -131,7 +131,7 @@ final class GlobalPushToTalkShortcutMonitor: ObservableObject {
         }
 
         guard isActivationShortcutEnabled else {
-            handleStandaloneControlTapIfNeeded(eventType: eventType, event: event)
+            handleStandaloneShiftTapIfNeeded(eventType: eventType, event: event)
             return Unmanaged.passUnretained(event)
         }
 
@@ -145,7 +145,7 @@ final class GlobalPushToTalkShortcutMonitor: ObservableObject {
 
         switch shortcutTransition {
         case .none:
-            handleStandaloneControlTapIfNeeded(eventType: eventType, event: event)
+            handleStandaloneShiftTapIfNeeded(eventType: eventType, event: event)
         case .pressed:
             isShortcutCurrentlyPressed = true
             shortcutTransitionPublisher.send(.pressed)
@@ -157,27 +157,27 @@ final class GlobalPushToTalkShortcutMonitor: ObservableObject {
         return Unmanaged.passUnretained(event)
     }
 
-    private func handleStandaloneControlTapIfNeeded(eventType: CGEventType, event: CGEvent) {
+    private func handleStandaloneShiftTapIfNeeded(eventType: CGEventType, event: CGEvent) {
         guard eventType == .flagsChanged else { return }
 
         let flags = event.flags
-        let isControlDown = flags.contains(.maskControl)
-        let isControlOnly = isControlDown
+        let isShiftDown = flags.contains(.maskShift)
+        let isShiftOnly = isShiftDown
             && !flags.contains(.maskAlternate)
-            && !flags.contains(.maskShift)
+            && !flags.contains(.maskControl)
             && !flags.contains(.maskCommand)
 
-        if isControlOnly && !isControlCurrentlyPressed {
+        if isShiftOnly && !isShiftCurrentlyPressed {
             let now = Date()
-            if let lastStandaloneControlTapDate,
-               now.timeIntervalSince(lastStandaloneControlTapDate) <= maximumControlDoubleTapInterval {
-                self.lastStandaloneControlTapDate = nil
-                controlDoubleTapPublisher.send(NSEvent.mouseLocation)
+            if let lastStandaloneShiftTapDate,
+               now.timeIntervalSince(lastStandaloneShiftTapDate) <= maximumShiftDoubleTapInterval {
+                self.lastStandaloneShiftTapDate = nil
+                shiftDoubleTapPublisher.send(NSEvent.mouseLocation)
             } else {
-                lastStandaloneControlTapDate = now
+                lastStandaloneShiftTapDate = now
             }
         }
 
-        isControlCurrentlyPressed = isControlDown
+        isShiftCurrentlyPressed = isShiftDown
     }
 }
