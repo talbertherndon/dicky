@@ -9,7 +9,7 @@ private enum OpenClickyHUDLayout {
     static let minimumHeight: CGFloat = 452
     static let screenEdgePadding: CGFloat = 20
     static let preferredBottomMargin: CGFloat = 24
-    static let fallbackMinimumDimension: CGFloat = 1
+    static let fallbackMinimumDimension: CGFloat = 240
 }
 
 @MainActor
@@ -96,7 +96,6 @@ final class CodexHUDWindowManager {
         let minimumHeight = min(OpenClickyHUDLayout.minimumHeight, availableHeight)
 
         panel.minSize = NSSize(width: minimumWidth, height: minimumHeight)
-        panel.contentMinSize = NSSize(width: minimumWidth, height: minimumHeight)
 
         let currentFrame = panel.frame
         let constrainedWidth = min(max(currentFrame.width, minimumWidth), availableWidth)
