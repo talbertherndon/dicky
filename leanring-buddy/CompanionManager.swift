@@ -2436,6 +2436,13 @@ final class CompanionManager: ObservableObject {
         ChatWorkspaceArchiveStore.save(archivedSessionIDs)
         ChatWorkspaceArchiveStore.saveSnapshot(for: session)
         ChatWorkspaceArchiveStore.removeRelaunchableSnapshot(for: sessionID)
+        cancelPendingAgentDockItemRemoval(for: sessionID)
+        silenceAgentSpeech(for: sessionID, reason: "agent_session_archived")
+        agentDockItems.removeAll { $0.sessionID == sessionID }
+        if agentDockItems.isEmpty {
+            agentDockWindowManager.hide()
+        }
+        refreshAgentDockFollowBehavior()
         if activeCodexAgentSessionID == sessionID {
             if let next = codexAgentSessions.first(where: { !archivedSessionIDs.contains($0.id) }) {
                 selectCodexAgentSession(next.id)
@@ -2443,6 +2450,7 @@ final class CompanionManager: ObservableObject {
                 _ = createAndSelectNewCodexAgentSession()
             }
         }
+        scheduleWidgetSnapshotPublish()
     }
 
     /// Restore a previously archived session.
@@ -2454,6 +2462,7 @@ final class CompanionManager: ObservableObject {
         ChatWorkspaceArchiveStore.save(archivedSessionIDs)
         ChatWorkspaceArchiveStore.removeSnapshot(for: sessionID)
         persistRelaunchableAgentSessions()
+        scheduleWidgetSnapshotPublish()
     }
 
     /// Pop the currently active session into a floating mini-chat NSPanel scoped to that session.
@@ -6839,7 +6848,7 @@ final class CompanionManager: ObservableObject {
             rawText: summary,
             contextTitle: "Agent status"
         )
-        if codexAgentSessions.contains(where: { $0.hasVisibleActivity }) {
+        if codexAgentSessions.contains(where: { $0.hasVisibleActivity && !archivedSessionIDs.contains($0.id) }) {
             ensureCursorOverlayVisibleForAgentTask()
             showAgentDockWindowNearCurrentScreen()
         }
@@ -6852,14 +6861,18 @@ final class CompanionManager: ObservableObject {
                 "executor": "agent_mode",
                 "executionMethod": "agentStatusSpokenSummary",
                 "controller": "CompanionManager",
-                "visibleAgentCount": codexAgentSessions.filter(\.hasVisibleActivity).count
+                "visibleAgentCount": codexAgentSessions.filter { session in
+                    session.hasVisibleActivity && !archivedSessionIDs.contains(session.id)
+                }.count
             ]
         )
         return true
     }
 
     private func agentStatusSpokenSummary() -> String {
-        let visibleSessions = codexAgentSessions.filter(\.hasVisibleActivity)
+        let visibleSessions = codexAgentSessions.filter { session in
+            session.hasVisibleActivity && !archivedSessionIDs.contains(session.id)
+        }
         guard !visibleSessions.isEmpty else {
             return "no agents are running yet."
         }

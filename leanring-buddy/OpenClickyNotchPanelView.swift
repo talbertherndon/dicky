@@ -54,6 +54,7 @@ struct OpenClickyNotchPanelView: View {
     @AppStorage(ClickyCursorAvatarStyle.userDefaultsKey) private var avatarStyleRawValue = ClickyCursorAvatarStyle.default.storageValue
     @AppStorage(ClickyCursorAvatarSizePreference.userDefaultsKey) private var cursorAvatarSizeScale = ClickyCursorAvatarSizePreference.defaultScale
     @AppStorage(AppBundleConfiguration.userAppFontDefaultsKey) private var appFontRawValue = OpenClickyResponseCaptionFont.fallback.rawValue
+    @AppStorage(AppBundleConfiguration.userAppBoldTextDefaultsKey) private var appBoldTextEnabled = false
     @AppStorage(AppBundleConfiguration.userAppBodyFontSizeDefaultsKey) private var appBodyFontSize = 13.0
     @AppStorage(AppBundleConfiguration.userAppSubtextFontSizeDefaultsKey) private var appSubtextFontSize = 11.0
     @State private var isShowingHatchSheet = false
@@ -78,7 +79,19 @@ struct OpenClickyNotchPanelView: View {
     private var subtextFontSize: CGFloat { CGFloat(appSubtextFontSize) }
 
     private func appUIFont(size: CGFloat, weight: Font.Weight = .medium) -> Font {
-        appFont.swiftUIFont(size: size, weight: weight)
+        appFont.swiftUIFont(size: size, weight: appResolvedWeight(weight))
+    }
+
+    private func appResolvedWeight(_ weight: Font.Weight) -> Font.Weight {
+        guard appBoldTextEnabled else { return weight }
+        switch weight {
+        case .regular, .medium:
+            return .semibold
+        case .semibold:
+            return .bold
+        default:
+            return weight
+        }
     }
     @State private var isCompactChatExpanded = false
     @State private var expandedAgentSessionID: UUID?
@@ -359,12 +372,14 @@ struct OpenClickyNotchPanelView: View {
     }
 
     private var topStatusRail: some View {
-        HStack(spacing: 8) {
-            statusPill(
-                title: activeVoiceLabel,
-                systemImageName: activeVoiceIcon,
-                color: activeVoiceAccent
-            )
+        HStack(spacing: 0) {
+            statusRailItem {
+                statusPill(
+                    title: activeVoiceLabel,
+                    systemImageName: activeVoiceIcon,
+                    color: activeVoiceAccent
+                )
+            }
             Button {
                 selectedTab = .agents
             } label: {
@@ -377,14 +392,21 @@ struct OpenClickyNotchPanelView: View {
             .buttonStyle(.plain)
             .accessibilityLabel("Show OpenClicky agents")
             .help("Show OpenClicky agents")
-            statusPill(
-                title: companionManager.allPermissionsGranted ? "Permission" : "Needs perms",
-                systemImageName: companionManager.allPermissionsGranted ? "checkmark.shield.fill" : "exclamationmark.shield.fill",
-                color: companionManager.allPermissionsGranted ? .green : .orange
-            )
+            .frame(maxWidth: .infinity, alignment: .center)
+            statusRailItem {
+                statusPill(
+                    title: companionManager.allPermissionsGranted ? "Permission" : "Needs perms",
+                    systemImageName: companionManager.allPermissionsGranted ? "checkmark.shield.fill" : "exclamationmark.shield.fill",
+                    color: companionManager.allPermissionsGranted ? .green : .orange
+                )
+            }
         }
-        .fixedSize(horizontal: true, vertical: false)
         .frame(maxWidth: .infinity, alignment: .center)
+    }
+
+    private func statusRailItem<Content: View>(@ViewBuilder content: () -> Content) -> some View {
+        content()
+            .frame(maxWidth: .infinity, alignment: .center)
     }
 
     private var tabStrip: some View {
@@ -1481,11 +1503,13 @@ struct OpenClickyNotchPanelView: View {
                     HStack(spacing: 10) {
                         if isRunning {
                             OpenClickyRunningAgentIndicator(color: agentStatusColor(session.status))
+                                .frame(width: 18, height: 10, alignment: .center)
                         } else {
                             Circle()
                                 .fill(agentStatusColor(session.status))
                                 .frame(width: 8, height: 8)
                                 .shadow(color: agentStatusColor(session.status).opacity(0.7), radius: 5, x: 0, y: 0)
+                                .frame(width: 18, height: 10, alignment: .center)
                         }
 
                         VStack(alignment: .leading, spacing: 2) {
@@ -1844,17 +1868,17 @@ struct OpenClickyNotchPanelView: View {
     }
 
     private func statusPill(title: String, systemImageName: String, color: Color) -> some View {
-        HStack(spacing: 8) {
+        HStack(spacing: 6) {
             Image(systemName: systemImageName)
-                .font(appUIFont(size: max(15, subtextFontSize + 4), weight: .heavy))
-            Text(title)
                 .font(appUIFont(size: max(13, subtextFontSize + 2), weight: .heavy))
+            Text(title)
+                .font(appUIFont(size: max(11, subtextFontSize), weight: .heavy))
         }
         .foregroundColor(color)
         .lineLimit(1)
         .fixedSize(horizontal: true, vertical: false)
-        .padding(.horizontal, max(11, subtextFontSize * 0.95))
-        .padding(.vertical, max(8, subtextFontSize * 0.66))
+        .padding(.horizontal, max(9, subtextFontSize * 0.72))
+        .padding(.vertical, max(6, subtextFontSize * 0.50))
         .background(Capsule(style: .continuous).fill(color.opacity(0.105)))
         .overlay(Capsule(style: .continuous).stroke(color.opacity(0.18), lineWidth: 1))
         .help(title)
@@ -2266,7 +2290,12 @@ private enum OpenClickyAgentSessionFilter: String, CaseIterable, Identifiable {
         case .active:
             return !isArchived
         case .running:
-            return !isArchived && session.isTurnActiveForChatQueue
+            switch session.status {
+            case .starting, .running:
+                return !isArchived
+            case .stopped, .ready, .failed:
+                return !isArchived && session.isTurnActiveForChatQueue
+            }
         case .completed:
             return !isArchived && session.progressStage == .completed
         case .archived:

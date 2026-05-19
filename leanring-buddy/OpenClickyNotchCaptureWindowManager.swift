@@ -105,6 +105,8 @@ final class OpenClickyNotchCaptureWindowManager {
     private var mainPanelLocalClickMonitor: Any?
     private var mainPanelEscapeKeyMonitor: Any?
     private var mainPanelContentSizeObserver: NSObjectProtocol?
+    private var isMainPanelUserResizing = false
+    private var mainPanelUserPreferredSize: NSSize?
     private var isMainPanelPinned = false
     private var activeMode: ActiveMode?
     private var persistentAccentColor = NSColor(calibratedRed: 0.20, green: 0.50, blue: 1.00, alpha: 1.0)
@@ -460,12 +462,18 @@ final class OpenClickyNotchCaptureWindowManager {
         }
         let resizeContainer = OpenClickyMainPanelResizeContainerView(frame: NSRect(origin: .zero, size: initialSize))
         resizeContainer.autoresizingMask = [.width, .height]
-        resizeContainer.isResizeEnabled = { [weak self] in self?.isMainPanelPinned == true }
+        resizeContainer.isResizeEnabled = { true }
+        resizeContainer.onResizeBegan = { [weak self] in
+            self?.isMainPanelUserResizing = true
+        }
         resizeContainer.onResizeFrameChanged = { [weak self] size in
+            self?.mainPanelUserPreferredSize = self?.constrainedMainPanelSize(size)
             self?.mainHostingView?.frame = NSRect(origin: .zero, size: size)
             self?.mainHostingView?.needsLayout = true
         }
         resizeContainer.onResizeEnded = { [weak self] size in
+            self?.isMainPanelUserResizing = false
+            self?.mainPanelUserPreferredSize = self?.constrainedMainPanelSize(size)
             self?.mainHostingView?.frame = NSRect(origin: .zero, size: size)
             self?.mainHostingView?.needsLayout = true
         }
@@ -873,7 +881,7 @@ final class OpenClickyNotchCaptureWindowManager {
 
     private func resizeVisibleMainPanelToCurrentContent(animated: Bool) {
         guard let mainPanel, mainPanel.isVisible else { return }
-        if (mainPanel.contentView as? OpenClickyMainPanelResizeContainerView)?.isUserResizing == true { return }
+        if isMainPanelUserResizing || (mainPanel.contentView as? OpenClickyMainPanelResizeContainerView)?.isUserResizing == true { return }
         if isMainPanelPinned {
             let size = constrainedMainPanelSize(mainPanel.frame.size)
             mainPanel.setFrame(
@@ -924,6 +932,9 @@ final class OpenClickyNotchCaptureWindowManager {
     private func preferredMainPanelSize() -> NSSize {
         if isMainPanelPinned, let mainPanel {
             return constrainedMainPanelSize(mainPanel.frame.size)
+        }
+        if let mainPanelUserPreferredSize {
+            return constrainedMainPanelSize(mainPanelUserPreferredSize)
         }
 
         guard let fittingHeight = mainHostingView?.fittingSize.height, fittingHeight > 0 else {
@@ -2593,27 +2604,69 @@ private final class OpenClickyMainPanelResizeContainerView: NSView {
     }
 
     var isResizeEnabled: (() -> Bool)?
+    var onResizeBegan: (() -> Void)?
     var onResizeFrameChanged: ((NSSize) -> Void)?
     var onResizeEnded: ((NSSize) -> Void)?
     private(set) var isUserResizing = false
 
-    private let edgeHitWidth: CGFloat = 16
-    private let cornerHitLength: CGFloat = 28
+    private let edgeHitWidth: CGFloat = 18
+    private let cornerHitLength: CGFloat = 40
+    private let bottomRightHitSize: CGFloat = 58
+    private let topDragHitHeight: CGFloat = 18
+    private let resizeHandleView = OpenClickyMainPanelResizeHandleView(frame: .zero)
     private var activeEdges: ResizeEdges = []
     private var dragStartMouseLocation: NSPoint = .zero
     private var dragStartFrame: NSRect = .zero
     private var windowWasMovableByBackground = false
 
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        commonInit()
+    }
+
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        commonInit()
+    }
+
+    private func commonInit() {
+        wantsLayer = true
+        addSubview(resizeHandleView)
+    }
+
+    override func didAddSubview(_ subview: NSView) {
+        super.didAddSubview(subview)
+        if subview !== resizeHandleView {
+            resizeHandleView.removeFromSuperview()
+            addSubview(resizeHandleView)
+        }
+    }
+
     override func layout() {
         super.layout()
-        subviews.forEach { $0.frame = bounds }
+        subviews.forEach { subview in
+            if subview === resizeHandleView {
+                subview.frame = NSRect(
+                    x: max(0, bounds.maxX - 64),
+                    y: bounds.minY,
+                    width: min(64, bounds.width),
+                    height: min(64, bounds.height)
+                )
+            } else {
+                subview.frame = bounds
+            }
+        }
     }
 
     override func hitTest(_ point: NSPoint) -> NSView? {
-        guard isResizeEnabled?() == true, !resizeEdges(at: point).isEmpty else {
-            return super.hitTest(point)
+        guard bounds.contains(point) else { return nil }
+        if isResizeEnabled?() == true, !resizeEdges(at: point).isEmpty {
+            return self
         }
-        return self
+        if draggablePanelPoint(point) {
+            return self
+        }
+        return super.hitTest(point)
     }
 
     override func resetCursorRects() {
@@ -2622,6 +2675,7 @@ private final class OpenClickyMainPanelResizeContainerView: NSView {
         addCursorRect(NSRect(x: bounds.maxX - edgeHitWidth, y: 0, width: edgeHitWidth, height: bounds.height), cursor: .resizeLeftRight)
         addCursorRect(NSRect(x: 0, y: 0, width: bounds.width, height: edgeHitWidth), cursor: .resizeUpDown)
         addCursorRect(NSRect(x: 0, y: bounds.maxY - edgeHitWidth, width: bounds.width, height: edgeHitWidth), cursor: .resizeUpDown)
+        addCursorRect(NSRect(x: bounds.maxX - bottomRightHitSize, y: 0, width: bottomRightHitSize, height: bottomRightHitSize), cursor: .resizeLeftRight)
     }
 
     override func mouseDown(with event: NSEvent) {
@@ -2631,12 +2685,17 @@ private final class OpenClickyMainPanelResizeContainerView: NSView {
         }
         activeEdges = resizeEdges(at: convert(event.locationInWindow, from: nil))
         guard !activeEdges.isEmpty, let window else {
+            if let window, draggablePanelPoint(convert(event.locationInWindow, from: nil)) {
+                window.performDrag(with: event)
+                return
+            }
             super.mouseDown(with: event)
             return
         }
         isUserResizing = true
         windowWasMovableByBackground = window.isMovableByWindowBackground
         window.isMovableByWindowBackground = false
+        onResizeBegan?()
         dragStartMouseLocation = NSEvent.mouseLocation
         dragStartFrame = window.frame
     }
@@ -2680,6 +2739,9 @@ private final class OpenClickyMainPanelResizeContainerView: NSView {
         if let window {
             window.isMovableByWindowBackground = windowWasMovableByBackground
             onResizeEnded?(window.frame.size)
+            if let contentView = window.contentView {
+                window.invalidateCursorRects(for: contentView)
+            }
         }
         isUserResizing = false
         activeEdges = []
@@ -2701,16 +2763,13 @@ private final class OpenClickyMainPanelResizeContainerView: NSView {
         window.setFrame(alignedFrame, display: true, animate: false)
         CATransaction.commit()
         onResizeFrameChanged?(alignedFrame.size)
-
-        if let contentView = window.contentView {
-            window.invalidateCursorRects(for: contentView)
-        }
     }
 
     private func resizeEdges(at point: NSPoint) -> ResizeEdges {
         guard bounds.contains(point) else { return [] }
 
         var edges: ResizeEdges = []
+        let inBottomRightGrip = point.x >= bounds.maxX - bottomRightHitSize && point.y <= bottomRightHitSize
         let nearLeft = point.x <= edgeHitWidth
         let nearRight = point.x >= bounds.maxX - edgeHitWidth
         let nearBottom = point.y <= edgeHitWidth
@@ -2721,10 +2780,59 @@ private final class OpenClickyMainPanelResizeContainerView: NSView {
         let inRightCornerBand = point.x >= bounds.maxX - cornerHitLength
 
         if nearLeft || (inLeftCornerBand && (nearTop || nearBottom)) { edges.insert(.left) }
-        if nearRight || (inRightCornerBand && (nearTop || nearBottom)) { edges.insert(.right) }
-        if nearBottom || (inLowerCornerBand && (nearLeft || nearRight)) { edges.insert(.bottom) }
+        if nearRight || inBottomRightGrip || (inRightCornerBand && (nearTop || nearBottom)) { edges.insert(.right) }
+        if nearBottom || inBottomRightGrip || (inLowerCornerBand && (nearLeft || nearRight)) { edges.insert(.bottom) }
         if nearTop || (inUpperCornerBand && (nearLeft || nearRight)) { edges.insert(.top) }
         return edges
+    }
+
+    private func draggablePanelPoint(_ point: NSPoint) -> Bool {
+        guard bounds.contains(point), resizeEdges(at: point).isEmpty else { return false }
+        return point.y >= bounds.maxY - topDragHitHeight
+    }
+}
+
+private final class OpenClickyMainPanelResizeHandleView: NSView {
+    override var isFlipped: Bool { true }
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+        layer?.backgroundColor = NSColor.clear.cgColor
+    }
+
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        wantsLayer = true
+        layer?.backgroundColor = NSColor.clear.cgColor
+    }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        nil
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        guard let context = NSGraphicsContext.current?.cgContext else { return }
+        context.saveGState()
+        context.setLineCap(.round)
+        context.setLineWidth(2)
+        context.setStrokeColor(NSColor.white.withAlphaComponent(0.34).cgColor)
+
+        let inset: CGFloat = 13
+        let spacing: CGFloat = 7
+        let maxX = bounds.maxX - inset
+        let maxY = bounds.maxY - inset
+        for index in 0..<3 {
+            let offset = CGFloat(index) * spacing
+            context.move(to: CGPoint(x: maxX - 22 + offset, y: maxY))
+            context.addLine(to: CGPoint(x: maxX, y: maxY - 22 + offset))
+        }
+        context.strokePath()
+
+        context.setFillColor(NSColor.white.withAlphaComponent(0.08).cgColor)
+        context.fillEllipse(in: CGRect(x: bounds.maxX - 18, y: bounds.maxY - 18, width: 5, height: 5))
+        context.restoreGState()
     }
 }
 

@@ -20,3 +20,11 @@ worker/.env.local
 /.codesurf
 /.contex
 /output
+
+# Release build artifacts
+/build/
+/dist/
+*.xcarchive
+
+# Local-only MCP server URL (port rotates between launches)
+.mcp.json

@@ -15,6 +15,7 @@ struct ConversationSidebarView: View {
   @State private var search: String = ""
   @State private var showArchived: Bool = false
   @AppStorage(AppBundleConfiguration.userAppFontDefaultsKey) private var appFontRawValue = OpenClickyResponseCaptionFont.fallback.rawValue
+  @AppStorage(AppBundleConfiguration.userAppBoldTextDefaultsKey) private var appBoldTextEnabled = false
   @AppStorage(AppBundleConfiguration.userAppBodyFontSizeDefaultsKey) private var appBodyFontSize = 13.0
   @AppStorage(AppBundleConfiguration.userAppSubtextFontSizeDefaultsKey) private var appSubtextFontSize = 11.0
 
@@ -33,7 +34,19 @@ struct ConversationSidebarView: View {
   private var subtextFontSize: CGFloat { CGFloat(appSubtextFontSize) }
 
   private func appUIFont(size: CGFloat, weight: Font.Weight = .medium) -> Font {
-    appFont.swiftUIFont(size: size, weight: weight)
+    appFont.swiftUIFont(size: size, weight: appResolvedWeight(weight))
+  }
+
+  private func appResolvedWeight(_ weight: Font.Weight) -> Font.Weight {
+    guard appBoldTextEnabled else { return weight }
+    switch weight {
+    case .regular, .medium:
+      return .semibold
+    case .semibold:
+      return .bold
+    default:
+      return weight
+    }
   }
 
   var body: some View {

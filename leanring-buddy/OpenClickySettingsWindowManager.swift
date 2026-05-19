@@ -160,6 +160,8 @@ struct OpenClickySettingsView: View {
     @AppStorage(AppBundleConfiguration.userAppTitleFontSizeDefaultsKey) private var appTitleFontSize = 26.0
     @AppStorage(AppBundleConfiguration.userAppBodyFontSizeDefaultsKey) private var appBodyFontSize = 13.0
     @AppStorage(AppBundleConfiguration.userAppSubtextFontSizeDefaultsKey) private var appSubtextFontSize = 11.0
+    @AppStorage(AppBundleConfiguration.userAppLineSpacingDefaultsKey) private var appLineSpacing = 2.0
+    @AppStorage(AppBundleConfiguration.userAppBoldTextDefaultsKey) private var appBoldTextEnabled = false
     @AppStorage(AppBundleConfiguration.openClickyVoicePlaybackVolumeDefaultsKey) private var openClickyVoicePlaybackVolume = AppBundleConfiguration.voicePlaybackVolume()
     @AppStorage(AppBundleConfiguration.userCodexAgentAPIKeyDefaultsKey) private var userCodexAgentAPIKey = ""
     @AppStorage(AppBundleConfiguration.userAssemblyAIAPIKeyDefaultsKey) private var userAssemblyAIAPIKey = ""
@@ -190,9 +192,22 @@ struct OpenClickySettingsView: View {
     private var titleFontSize: CGFloat { CGFloat(appTitleFontSize) }
     private var bodyFontSize: CGFloat { CGFloat(appBodyFontSize) }
     private var subtextFontSize: CGFloat { CGFloat(appSubtextFontSize) }
+    private var appTextLineSpacing: CGFloat { CGFloat(appLineSpacing) }
 
     private func appUIFont(size: CGFloat, weight: Font.Weight = .medium) -> Font {
-        appFont.swiftUIFont(size: size, weight: weight)
+        appFont.swiftUIFont(size: size, weight: appResolvedWeight(weight))
+    }
+
+    private func appResolvedWeight(_ weight: Font.Weight) -> Font.Weight {
+        guard appBoldTextEnabled else { return weight }
+        switch weight {
+        case .regular, .medium:
+            return .semibold
+        case .semibold:
+            return .bold
+        default:
+            return weight
+        }
     }
 
     var body: some View {
@@ -215,6 +230,7 @@ struct OpenClickySettingsView: View {
         }
         .frame(minWidth: 1040, minHeight: 660)
         .font(appUIFont(size: bodyFontSize, weight: .regular))
+        .lineSpacing(appTextLineSpacing)
         .onChange(of: selectedSection) { _, newSection in
             if newSection == .googleWorkspace, !gogCLIStatus.isInstalled, !isRefreshingGogCLIStatus {
                 refreshGogCLIStatus()
@@ -375,11 +391,29 @@ struct OpenClickySettingsView: View {
                     range: 9...15
                 )
 
+                fontSizeSliderRow(
+                    title: "Line height",
+                    subtitle: "Adds breathing room to multiline OpenClicky text.",
+                    systemImageName: "line.3.horizontal.decrease",
+                    value: $appLineSpacing,
+                    range: 0...8,
+                    suffix: " px"
+                )
+
+                toggleRow(
+                    title: "Bold interface text",
+                    subtitle: "Makes normal OpenClicky labels and messages use a stronger weight.",
+                    systemImageName: "bold",
+                    isOn: $appBoldTextEnabled
+                )
+
                 actionRow(title: "Reset font settings", systemImageName: "arrow.counterclockwise") {
                     appFontRawValue = OpenClickyResponseCaptionFont.fallback.rawValue
                     appTitleFontSize = 26.0
                     appBodyFontSize = 13.0
                     appSubtextFontSize = 11.0
+                    appLineSpacing = 2.0
+                    appBoldTextEnabled = false
                 }
             }
 
@@ -1387,15 +1421,16 @@ struct OpenClickySettingsView: View {
         subtitle: String,
         systemImageName: String,
         value: Binding<Double>,
-        range: ClosedRange<Double>
+        range: ClosedRange<Double>,
+        suffix: String = " pt"
     ) -> some View {
         editableFieldRow(title: title, subtitle: subtitle, systemImageName: systemImageName) {
             HStack(spacing: 10) {
                 Slider(value: value, in: range, step: 1)
-                Text("\(Int(value.wrappedValue.rounded())) pt")
+                Text("\(Int(value.wrappedValue.rounded()))\(suffix)")
                     .font(appUIFont(size: subtextFontSize, weight: .medium))
                     .foregroundColor(.secondary)
-                    .frame(width: 44, alignment: .trailing)
+                    .frame(width: 48, alignment: .trailing)
             }
         }
     }

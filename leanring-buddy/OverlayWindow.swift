@@ -347,7 +347,14 @@ struct ExternalProxyBubbleSizePreferenceKey: PreferenceKey {
 
 nonisolated enum OpenClickyResponseCaptionFont: String, CaseIterable, Identifiable {
     case systemRounded
+    case systemSerif
+    case systemMonospaced
     case avenirRounded
+    case avenirNext
+    case helveticaNeue
+    case georgia
+    case baskerville
+    case palatino
     case markerFelt
     case chalkboard
     case comicSans
@@ -358,7 +365,14 @@ nonisolated enum OpenClickyResponseCaptionFont: String, CaseIterable, Identifiab
     var label: String {
         switch self {
         case .systemRounded: return "System Rounded"
+        case .systemSerif: return "System Serif"
+        case .systemMonospaced: return "System Mono"
         case .avenirRounded: return "Avenir Rounded"
+        case .avenirNext: return "Avenir Next"
+        case .helveticaNeue: return "Helvetica Neue"
+        case .georgia: return "Georgia"
+        case .baskerville: return "Baskerville"
+        case .palatino: return "Palatino"
         case .markerFelt: return "Marker Felt"
         case .chalkboard: return "Chalkboard"
         case .comicSans: return "Comic Sans"
@@ -369,7 +383,14 @@ nonisolated enum OpenClickyResponseCaptionFont: String, CaseIterable, Identifiab
     var subtitle: String {
         switch self {
         case .systemRounded: return "Clean default"
+        case .systemSerif: return "Bookish serif"
+        case .systemMonospaced: return "Code-like mono"
         case .avenirRounded: return "Friendly rounded"
+        case .avenirNext: return "Modern sans"
+        case .helveticaNeue: return "Classic sans"
+        case .georgia: return "Readable serif"
+        case .baskerville: return "Elegant serif"
+        case .palatino: return "Warm serif"
         case .markerFelt: return "Cartoon marker"
         case .chalkboard: return "Comic board"
         case .comicSans: return "Comic book"
@@ -379,8 +400,13 @@ nonisolated enum OpenClickyResponseCaptionFont: String, CaseIterable, Identifiab
 
     var fontName: String? {
         switch self {
-        case .systemRounded: return nil
+        case .systemRounded, .systemSerif, .systemMonospaced: return nil
         case .avenirRounded: return "Avenir Next Rounded"
+        case .avenirNext: return "Avenir Next"
+        case .helveticaNeue: return "Helvetica Neue"
+        case .georgia: return "Georgia"
+        case .baskerville: return "Baskerville"
+        case .palatino: return "Palatino"
         case .markerFelt: return "Marker Felt"
         case .chalkboard: return "Chalkboard SE"
         case .comicSans: return "Comic Sans MS"
@@ -398,7 +424,14 @@ nonisolated enum OpenClickyResponseCaptionFont: String, CaseIterable, Identifiab
         if let fontName {
             return .custom(fontName, size: size).weight(weight)
         }
-        return .system(size: size, weight: weight, design: .rounded)
+        switch self {
+        case .systemSerif:
+            return .system(size: size, weight: weight, design: .serif)
+        case .systemMonospaced:
+            return .system(size: size, weight: weight, design: .monospaced)
+        default:
+            return .system(size: size, weight: weight, design: .rounded)
+        }
     }
 }
 

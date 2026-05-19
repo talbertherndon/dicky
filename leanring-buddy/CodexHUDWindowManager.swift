@@ -8,6 +8,7 @@ enum OpenClickyHUDLayout {
     static let height: CGFloat = 560
     static let minimumWidth: CGFloat = 720
     static let minimumHeight: CGFloat = 452
+    static let cornerRadius: CGFloat = 24
     static let screenEdgePadding: CGFloat = 20
     static let preferredBottomMargin: CGFloat = 24
     static let fallbackMinimumDimension: CGFloat = 240
@@ -40,7 +41,7 @@ final class CodexHUDWindowManager: NSObject, NSWindowDelegate {
                 openMemory: openMemory,
                 prepareVoiceFollowUp: prepareVoiceFollowUp
             )
-        } else if let hostingView = panel?.contentView as? NSHostingView<ChatWorkspaceView> {
+        } else if let panel, let hostingView = hudHostingView(in: panel) {
             hostingView.rootView = ChatWorkspaceView(
                 companionManager: companionManager,
                 openMemory: openMemory,
@@ -77,6 +78,12 @@ final class CodexHUDWindowManager: NSObject, NSWindowDelegate {
                 dismiss: { [weak self] in self?.hide() }
             )
         )
+        hostingView.wantsLayer = true
+        hostingView.layer?.cornerRadius = OpenClickyHUDLayout.cornerRadius
+        hostingView.layer?.cornerCurve = .continuous
+        hostingView.layer?.masksToBounds = true
+        hostingView.layer?.backgroundColor = NSColor.clear.cgColor
+        hostingView.autoresizingMask = [.width, .height]
         // Keep the HUD as an OpenClicky surface, not a standard app window:
         // the SwiftUI header owns close/actions, while the panel stays keyable
         // for typing without showing a titlebar or traffic lights.
@@ -96,7 +103,10 @@ final class CodexHUDWindowManager: NSObject, NSWindowDelegate {
         panel.hasShadow = true
         panel.minSize = NSSize(width: OpenClickyHUDLayout.minimumWidth, height: OpenClickyHUDLayout.minimumHeight)
         panel.contentMinSize = NSSize(width: OpenClickyHUDLayout.minimumWidth, height: OpenClickyHUDLayout.minimumHeight)
-        panel.contentView = hostingView
+        let resizeContainer = OpenClickyHUDResizeContainerView(frame: NSRect(x: 0, y: 0, width: OpenClickyHUDLayout.width, height: OpenClickyHUDLayout.height))
+        resizeContainer.autoresizingMask = [.width, .height]
+        resizeContainer.addSubview(hostingView)
+        panel.contentView = resizeContainer
         panel.delegate = self
         panel.isReleasedWhenClosed = false
         for button in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton] {
@@ -115,6 +125,7 @@ final class CodexHUDWindowManager: NSObject, NSWindowDelegate {
         let minimumHeight = min(OpenClickyHUDLayout.minimumHeight, availableHeight)
 
         panel.minSize = NSSize(width: minimumWidth, height: minimumHeight)
+        panel.contentMinSize = NSSize(width: minimumWidth, height: minimumHeight)
 
         let currentFrame = panel.frame
         let constrainedWidth = min(max(currentFrame.width, minimumWidth), availableWidth)
@@ -170,6 +181,13 @@ final class CodexHUDWindowManager: NSObject, NSWindowDelegate {
     ) -> CGFloat {
         max(minimumOrigin, maximumBoundary - contentDimension - edgePadding)
     }
+
+    private func hudHostingView(in panel: NSPanel) -> NSHostingView<ChatWorkspaceView>? {
+        if let hostingView = panel.contentView as? NSHostingView<ChatWorkspaceView> {
+            return hostingView
+        }
+        return panel.contentView?.subviews.compactMap { $0 as? NSHostingView<ChatWorkspaceView> }.first
+    }
 }
 
 struct CodexHUDView: View {
@@ -220,6 +238,8 @@ struct CodexHUDView: View {
     @ObservedObject var companionManager: CompanionManager
     @AppStorage(ClickyAccentTheme.userDefaultsKey) private var selectedAccentThemeID = ClickyAccentTheme.blue.rawValue
     @AppStorage(AppBundleConfiguration.userAppFontDefaultsKey) private var appFontRawValue = OpenClickyResponseCaptionFont.fallback.rawValue
+    @AppStorage(AppBundleConfiguration.userAppBoldTextDefaultsKey) private var appBoldTextEnabled = false
+    @AppStorage(AppBundleConfiguration.userAppLineSpacingDefaultsKey) private var appLineSpacing = 2.0
     @AppStorage(AppBundleConfiguration.userAppTitleFontSizeDefaultsKey) private var appTitleFontSize = 26.0
     @AppStorage(AppBundleConfiguration.userAppBodyFontSizeDefaultsKey) private var appBodyFontSize = 13.0
     @AppStorage(AppBundleConfiguration.userAppSubtextFontSizeDefaultsKey) private var appSubtextFontSize = 11.0
@@ -245,9 +265,22 @@ struct CodexHUDView: View {
     private var titleFontSize: CGFloat { CGFloat(appTitleFontSize) }
     private var bodyFontSize: CGFloat { CGFloat(appBodyFontSize) }
     private var subtextFontSize: CGFloat { CGFloat(appSubtextFontSize) }
+    private var appTextLineSpacing: CGFloat { CGFloat(appLineSpacing) }
 
     private func appUIFont(size: CGFloat, weight: Font.Weight = .medium) -> Font {
-        appFont.swiftUIFont(size: size, weight: weight)
+        appFont.swiftUIFont(size: size, weight: appResolvedWeight(weight))
+    }
+
+    private func appResolvedWeight(_ weight: Font.Weight) -> Font.Weight {
+        guard appBoldTextEnabled else { return weight }
+        switch weight {
+        case .regular, .medium:
+            return .semibold
+        case .semibold:
+            return .bold
+        default:
+            return weight
+        }
     }
 
     private var activeDockItem: ClickyAgentDockItem? {
@@ -320,7 +353,9 @@ struct CodexHUDView: View {
         .onDrop(
             of: [UTType.fileURL.identifier, UTType.image.identifier, UTType.png.identifier, UTType.jpeg.identifier],
             isTargeted: $isDropTargeted,
-            perform: handleDrop
+            perform: { providers in
+                chromeMode == .standalone ? handleDrop(providers) : false
+            }
         )
         .confirmationDialog(
             "Stop this running OpenClicky task?",
@@ -457,7 +492,7 @@ struct CodexHUDView: View {
                                 if isAgentSessionRunning(agentSession) {
                                     pendingStopAgentSessionID = agentSession.id
                                 } else {
-                                    companionManager.closeCodexAgentSession(agentSession.id)
+                                    companionManager.archiveSession(agentSession.id)
                                 }
                             }
                         )
@@ -633,6 +668,7 @@ struct CodexHUDView: View {
                 .foregroundColor(DS.Colors.textPrimary)
                 .multilineTextAlignment(.leading)
                 .textSelection(.enabled)
+                .lineSpacing(appTextLineSpacing)
                 .fixedSize(horizontal: false, vertical: true)
 
             let openableLinks = OpenClickyOpenableLinkExtractor.links(in: entry.text, limit: 2)
@@ -768,6 +804,7 @@ struct CodexHUDView: View {
                             .font(.system(size: max(10, bodyFontSize - 3), weight: .medium, design: .monospaced))
                             .foregroundColor(DS.Colors.textSecondary)
                             .textSelection(.enabled)
+                            .lineSpacing(appTextLineSpacing)
                             .fixedSize(horizontal: false, vertical: true)
                             .padding(.horizontal, 8)
                             .padding(.vertical, 5)
@@ -1265,6 +1302,7 @@ private struct HUDHeaderPill: View {
     let systemImageName: String
     let color: Color
     @AppStorage(AppBundleConfiguration.userAppFontDefaultsKey) private var appFontRawValue = OpenClickyResponseCaptionFont.fallback.rawValue
+    @AppStorage(AppBundleConfiguration.userAppBoldTextDefaultsKey) private var appBoldTextEnabled = false
     @AppStorage(AppBundleConfiguration.userAppSubtextFontSizeDefaultsKey) private var appSubtextFontSize = 11.0
 
     private var appFont: OpenClickyResponseCaptionFont {
@@ -1274,7 +1312,19 @@ private struct HUDHeaderPill: View {
     private var subtextFontSize: CGFloat { CGFloat(appSubtextFontSize) }
 
     private func appUIFont(size: CGFloat, weight: Font.Weight = .medium) -> Font {
-        appFont.swiftUIFont(size: size, weight: weight)
+        appFont.swiftUIFont(size: size, weight: appResolvedWeight(weight))
+    }
+
+    private func appResolvedWeight(_ weight: Font.Weight) -> Font.Weight {
+        guard appBoldTextEnabled else { return weight }
+        switch weight {
+        case .regular, .medium:
+            return .semibold
+        case .semibold:
+            return .bold
+        default:
+            return weight
+        }
     }
 
     var body: some View {
@@ -1300,6 +1350,7 @@ private struct HUDFloatingAgentButton: View {
     var close: () -> Void
     @State private var isHovered = false
     @AppStorage(AppBundleConfiguration.userAppFontDefaultsKey) private var appFontRawValue = OpenClickyResponseCaptionFont.fallback.rawValue
+    @AppStorage(AppBundleConfiguration.userAppBoldTextDefaultsKey) private var appBoldTextEnabled = false
     @AppStorage(AppBundleConfiguration.userAppBodyFontSizeDefaultsKey) private var appBodyFontSize = 13.0
     @AppStorage(AppBundleConfiguration.userAppSubtextFontSizeDefaultsKey) private var appSubtextFontSize = 11.0
 
@@ -1311,7 +1362,19 @@ private struct HUDFloatingAgentButton: View {
     private var subtextFontSize: CGFloat { CGFloat(appSubtextFontSize) }
 
     private func appUIFont(size: CGFloat, weight: Font.Weight = .medium) -> Font {
-        appFont.swiftUIFont(size: size, weight: weight)
+        appFont.swiftUIFont(size: size, weight: appResolvedWeight(weight))
+    }
+
+    private func appResolvedWeight(_ weight: Font.Weight) -> Font.Weight {
+        guard appBoldTextEnabled else { return weight }
+        switch weight {
+        case .regular, .medium:
+            return .semibold
+        case .semibold:
+            return .bold
+        default:
+            return weight
+        }
     }
 
     private var isRunning: Bool {
@@ -1322,6 +1385,10 @@ private struct HUDFloatingAgentButton: View {
             return session.isTurnActiveForChatQueue
         }
     }
+
+    private var closeTitle: String { isRunning ? "Stop running task" : "Archive agent session" }
+    private var closeIcon: String { isRunning ? "stop.circle.fill" : "archivebox" }
+    private var closeAccessibilityLabel: String { isRunning ? "Stop running task \(session.title)" : "Archive \(session.title)" }
 
     var body: some View {
         ZStack(alignment: .topTrailing) {
@@ -1387,14 +1454,14 @@ private struct HUDFloatingAgentButton: View {
             .accessibilityLabel("Open \(session.title)")
             .help(session.title)
             .contextMenu {
-                Button(role: .destructive, action: close) {
-                    Label("Close agent session", systemImage: "xmark.circle")
+                Button(action: close) {
+                    Label(closeTitle, systemImage: closeIcon)
                 }
             }
 
             if isHovered {
                 Button(action: close) {
-                    Image(systemName: "xmark")
+                    Image(systemName: isRunning ? "stop.fill" : "xmark")
                         .font(appUIFont(size: max(8, subtextFontSize - 3), weight: .semibold))
                         .foregroundColor(DS.Colors.textPrimary)
                         .frame(width: 15, height: 15)
@@ -1406,8 +1473,8 @@ private struct HUDFloatingAgentButton: View {
                 }
                 .buttonStyle(.plain)
                 .pointerCursor()
-                .help("Close agent session")
-                .accessibilityLabel("Close \(session.title)")
+                .help(closeTitle)
+                .accessibilityLabel(closeAccessibilityLabel)
                 .offset(x: 2, y: -2)
                 .transition(.scale.combined(with: .opacity))
             }
@@ -1481,6 +1548,7 @@ private struct HUDRunButton: View {
     var stop: () -> Void
     @State private var isHovered = false
     @AppStorage(AppBundleConfiguration.userAppFontDefaultsKey) private var appFontRawValue = OpenClickyResponseCaptionFont.fallback.rawValue
+    @AppStorage(AppBundleConfiguration.userAppBoldTextDefaultsKey) private var appBoldTextEnabled = false
     @AppStorage(AppBundleConfiguration.userAppBodyFontSizeDefaultsKey) private var appBodyFontSize = 13.0
 
     private var appFont: OpenClickyResponseCaptionFont {
@@ -1490,7 +1558,19 @@ private struct HUDRunButton: View {
     private var bodyFontSize: CGFloat { CGFloat(appBodyFontSize) }
 
     private func appUIFont(size: CGFloat, weight: Font.Weight = .medium) -> Font {
-        appFont.swiftUIFont(size: size, weight: weight)
+        appFont.swiftUIFont(size: size, weight: appResolvedWeight(weight))
+    }
+
+    private func appResolvedWeight(_ weight: Font.Weight) -> Font.Weight {
+        guard appBoldTextEnabled else { return weight }
+        switch weight {
+        case .regular, .medium:
+            return .semibold
+        case .semibold:
+            return .bold
+        default:
+            return weight
+        }
     }
 
     private var showsStop: Bool {
@@ -1550,5 +1630,132 @@ private struct HUDRunButton: View {
         }
 
         return isHovered ? DS.Colors.borderStrong : DS.Colors.borderSubtle
+    }
+}
+
+private final class OpenClickyHUDResizeContainerView: NSView {
+    private struct ResizeEdges: OptionSet {
+        let rawValue: Int
+
+        static let left = ResizeEdges(rawValue: 1 << 0)
+        static let right = ResizeEdges(rawValue: 1 << 1)
+        static let bottom = ResizeEdges(rawValue: 1 << 2)
+        static let top = ResizeEdges(rawValue: 1 << 3)
+    }
+
+    private let edgeHitWidth: CGFloat = 16
+    private let cornerHitLength: CGFloat = 30
+    private var activeEdges: ResizeEdges = []
+    private var dragStartMouseLocation: NSPoint = .zero
+    private var dragStartFrame: NSRect = .zero
+    private var windowWasMovableByBackground = false
+
+    override func layout() {
+        super.layout()
+        subviews.forEach { $0.frame = bounds }
+    }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        guard !resizeEdges(at: point).isEmpty else {
+            return super.hitTest(point)
+        }
+        return self
+    }
+
+    override func resetCursorRects() {
+        addCursorRect(NSRect(x: 0, y: 0, width: edgeHitWidth, height: bounds.height), cursor: .resizeLeftRight)
+        addCursorRect(NSRect(x: bounds.maxX - edgeHitWidth, y: 0, width: edgeHitWidth, height: bounds.height), cursor: .resizeLeftRight)
+        addCursorRect(NSRect(x: 0, y: 0, width: bounds.width, height: edgeHitWidth), cursor: .resizeUpDown)
+        addCursorRect(NSRect(x: 0, y: bounds.maxY - edgeHitWidth, width: bounds.width, height: edgeHitWidth), cursor: .resizeUpDown)
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        activeEdges = resizeEdges(at: convert(event.locationInWindow, from: nil))
+        guard !activeEdges.isEmpty, let window else {
+            super.mouseDown(with: event)
+            return
+        }
+        windowWasMovableByBackground = window.isMovableByWindowBackground
+        window.isMovableByWindowBackground = false
+        dragStartMouseLocation = NSEvent.mouseLocation
+        dragStartFrame = window.frame
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        guard !activeEdges.isEmpty, let window else {
+            super.mouseDragged(with: event)
+            return
+        }
+
+        let mouseLocation = NSEvent.mouseLocation
+        let deltaX = mouseLocation.x - dragStartMouseLocation.x
+        let deltaY = mouseLocation.y - dragStartMouseLocation.y
+        let minSize = window.minSize
+        let maxSize = window.maxSize
+        let maxWidth = maxSize.width > 0 ? maxSize.width : CGFloat.greatestFiniteMagnitude
+        let maxHeight = maxSize.height > 0 ? maxSize.height : CGFloat.greatestFiniteMagnitude
+
+        var frame = dragStartFrame
+        if activeEdges.contains(.right) {
+            frame.size.width = min(max(dragStartFrame.width + deltaX, minSize.width), maxWidth)
+        }
+        if activeEdges.contains(.left) {
+            let width = min(max(dragStartFrame.width - deltaX, minSize.width), maxWidth)
+            frame.origin.x = dragStartFrame.maxX - width
+            frame.size.width = width
+        }
+        if activeEdges.contains(.top) {
+            frame.size.height = min(max(dragStartFrame.height + deltaY, minSize.height), maxHeight)
+        }
+        if activeEdges.contains(.bottom) {
+            let height = min(max(dragStartFrame.height - deltaY, minSize.height), maxHeight)
+            frame.origin.y = dragStartFrame.maxY - height
+            frame.size.height = height
+        }
+
+        applyResizeFrame(frame, to: window)
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        window?.isMovableByWindowBackground = windowWasMovableByBackground
+        activeEdges = []
+        needsLayout = true
+    }
+
+    private func applyResizeFrame(_ frame: NSRect, to window: NSWindow) {
+        let scale = window.screen?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 1
+        let alignedFrame = NSRect(
+            x: (frame.origin.x * scale).rounded() / scale,
+            y: (frame.origin.y * scale).rounded() / scale,
+            width: (frame.size.width * scale).rounded() / scale,
+            height: (frame.size.height * scale).rounded() / scale
+        )
+        guard alignedFrame != window.frame else { return }
+
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        window.setFrame(alignedFrame, display: true, animate: false)
+        CATransaction.commit()
+        window.invalidateCursorRects(for: self)
+    }
+
+    private func resizeEdges(at point: NSPoint) -> ResizeEdges {
+        guard bounds.contains(point) else { return [] }
+
+        var edges: ResizeEdges = []
+        let nearLeft = point.x <= edgeHitWidth
+        let nearRight = point.x >= bounds.maxX - edgeHitWidth
+        let nearBottom = point.y <= edgeHitWidth
+        let nearTop = point.y >= bounds.maxY - edgeHitWidth
+        let inLowerCornerBand = point.y <= cornerHitLength
+        let inUpperCornerBand = point.y >= bounds.maxY - cornerHitLength
+        let inLeftCornerBand = point.x <= cornerHitLength
+        let inRightCornerBand = point.x >= bounds.maxX - cornerHitLength
+
+        if nearLeft || (inLeftCornerBand && (nearTop || nearBottom)) { edges.insert(.left) }
+        if nearRight || (inRightCornerBand && (nearTop || nearBottom)) { edges.insert(.right) }
+        if nearBottom || (inLowerCornerBand && (nearLeft || nearRight)) { edges.insert(.bottom) }
+        if nearTop || (inUpperCornerBand && (nearLeft || nearRight)) { edges.insert(.top) }
+        return edges
     }
 }

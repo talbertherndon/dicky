@@ -15,7 +15,9 @@ struct ChatHeaderBar: View {
   @Binding var sidebarVisible: Bool
   @Binding var memoryDrawerOpen: Bool
   var openMemory: () -> Void
+  var dismissHUD: () -> Void
   @AppStorage(AppBundleConfiguration.userAppFontDefaultsKey) private var appFontRawValue = OpenClickyResponseCaptionFont.fallback.rawValue
+  @AppStorage(AppBundleConfiguration.userAppBoldTextDefaultsKey) private var appBoldTextEnabled = false
   @AppStorage(AppBundleConfiguration.userAppTitleFontSizeDefaultsKey) private var appTitleFontSize = 26.0
   @AppStorage(AppBundleConfiguration.userAppBodyFontSizeDefaultsKey) private var appBodyFontSize = 13.0
   @AppStorage(AppBundleConfiguration.userAppSubtextFontSizeDefaultsKey) private var appSubtextFontSize = 11.0
@@ -34,7 +36,19 @@ struct ChatHeaderBar: View {
   private var subtextFontSize: CGFloat { CGFloat(appSubtextFontSize) }
 
   private func appUIFont(size: CGFloat, weight: Font.Weight = .medium) -> Font {
-    appFont.swiftUIFont(size: size, weight: weight)
+    appFont.swiftUIFont(size: size, weight: appResolvedWeight(weight))
+  }
+
+  private func appResolvedWeight(_ weight: Font.Weight) -> Font.Weight {
+    guard appBoldTextEnabled else { return weight }
+    switch weight {
+    case .regular, .medium:
+      return .semibold
+    case .semibold:
+      return .bold
+    default:
+      return weight
+    }
   }
 
   var body: some View {
@@ -65,8 +79,13 @@ struct ChatHeaderBar: View {
         Button("Rename") {}
         Button("Duplicate") {}
         Divider()
-        Button("Close conversation", role: .destructive) {
-          companion.closeCodexAgentSession(session.id)
+        let isArchived = companion.archivedSessionIDs.contains(session.id)
+        Button(isArchived ? "Unarchive conversation" : "Archive conversation") {
+          if isArchived {
+            companion.unarchiveSession(session.id)
+          } else {
+            companion.archiveSession(session.id)
+          }
         }
       } label: {
         Image(systemName: "ellipsis")
@@ -77,6 +96,14 @@ struct ChatHeaderBar: View {
       .menuStyle(.borderlessButton)
       .menuIndicator(.hidden)
       .fixedSize()
+
+      iconButton(systemName: "xmark", help: "Close OpenClicky HUD") {
+        dismissHUD()
+      }
+      .background(Circle().fill(DS.Colors.surface2.opacity(0.92)))
+      .overlay(Circle().stroke(DS.Colors.borderSubtle, lineWidth: 1))
+      .fixedSize()
+      .accessibilityLabel("Close OpenClicky HUD")
     }
     .padding(.horizontal, 10)
     .padding(.vertical, 6)

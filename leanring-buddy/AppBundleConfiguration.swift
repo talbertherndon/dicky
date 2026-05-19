@@ -30,6 +30,8 @@ nonisolated enum AppBundleConfiguration {
     static let userAppTitleFontSizeDefaultsKey = "openClickyAppTitleFontSize"
     static let userAppBodyFontSizeDefaultsKey = "openClickyAppBodyFontSize"
     static let userAppSubtextFontSizeDefaultsKey = "openClickyAppSubtextFontSize"
+    static let userAppLineSpacingDefaultsKey = "openClickyAppLineSpacing"
+    static let userAppBoldTextDefaultsKey = "openClickyAppBoldTextEnabled"
     static let userCodexAgentAPIKeyDefaultsKey = "openClickyCodexAgentAPIKey"
     static let userAssemblyAIAPIKeyDefaultsKey = "openClickyAssemblyAIAPIKey"
     static let userDeepgramAPIKeyDefaultsKey = "openClickyDeepgramAPIKey"
