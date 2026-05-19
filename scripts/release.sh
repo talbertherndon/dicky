@@ -1,15 +1,24 @@
 #!/usr/bin/env bash
-# Build, sign, package, and notarize OpenClicky for distribution.
+# Build, sign, package, and notarize OpenClicky for direct distribution
+# OUTSIDE the Mac App Store. This is a "Developer ID" build -- the DMG can
+# be hosted on a website or fed into Sparkle for OTA updates, and Gatekeeper
+# accepts it because Apple has stamped the notarization ticket.
+#
+# NOT an App Store submission. scripts/ExportOptions.plist uses
+# method=developer-id; never change that to app-store unless you mean to.
 #
 # One-time setup (do this once per machine before first release build):
 #   1) Have a "Developer ID Application: Jason Kneen (SW75ZJJ5R6)" cert in
 #      the login keychain. Verify with:
 #        security find-identity -v -p codesigning | grep 'Developer ID'
-#   2) Create an app-specific password at https://appleid.apple.com (under
-#      Sign-In and Security -> App-Specific Passwords).
+#   2) Create an app-specific password at https://appleid.apple.com -- sign in
+#      with the Apple ID associated with your developer account (for this
+#      project: jason.knen@bouncingfish.com), then under
+#      Sign-In and Security -> App-Specific Passwords, generate one labeled
+#      e.g. "OpenClicky Notary".
 #   3) Store the notary credentials in a keychain profile (one time):
 #        xcrun notarytool store-credentials \
-#          --apple-id "you@example.com" \
+#          --apple-id "jason.knen@bouncingfish.com" \
 #          --team-id "SW75ZJJ5R6" \
 #          --password "abcd-efgh-ijkl-mnop" \
 #          OpenClickyNotary
@@ -87,6 +96,15 @@ fi
 
 if [[ ! -f "${EXPORT_OPTIONS}" ]]; then
     echo "ERROR: ${EXPORT_OPTIONS} missing." >&2
+    exit 1
+fi
+
+# OpenClicky is distributed direct (not through the App Store). Refuse to
+# build if the export options have been switched away from developer-id.
+export_method=$(/usr/libexec/PlistBuddy -c "Print :method" "${EXPORT_OPTIONS}" 2>/dev/null || echo "")
+if [[ "${export_method}" != "developer-id" ]]; then
+    echo "ERROR: ${EXPORT_OPTIONS} has method=\"${export_method}\"; expected \"developer-id\"." >&2
+    echo "       OpenClicky ships outside the App Store. Edit the plist before retrying." >&2
     exit 1
 fi
 
