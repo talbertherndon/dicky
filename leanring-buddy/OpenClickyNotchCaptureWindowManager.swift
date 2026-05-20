@@ -2687,7 +2687,7 @@ enum OpenClickyLiquidGlassWindowSurface {
         window.isOpaque = false
         window.backgroundColor = .clear
 
-        let containerView = NSView(frame: frame)
+        let containerView = OpenClickyGlassContainerView(frame: frame)
         containerView.autoresizingMask = [.width, .height]
         containerView.wantsLayer = true
         containerView.layer?.backgroundColor = NSColor.clear.cgColor
@@ -2729,6 +2729,13 @@ enum OpenClickyLiquidGlassWindowSurface {
             }
         }
         return nil
+    }
+}
+
+final class OpenClickyGlassContainerView: NSView {
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        guard bounds.contains(point) else { return nil }
+        return super.hitTest(point) ?? self
     }
 }
 
@@ -3105,7 +3112,7 @@ private final class OpenClickyMainPanelResizeContainerView: NSView {
         if draggablePanelPoint(point) {
             return self
         }
-        return super.hitTest(point)
+        return super.hitTest(point) ?? self
     }
 
     override func resetCursorRects() {

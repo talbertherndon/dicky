@@ -352,7 +352,7 @@ final class MenuBarPanelManager: NSObject {
         menuBarPanel.titlebarAppearsTransparent = true
         applyPanelMinimumSize(to: menuBarPanel)
 
-        let containerView = NSView(frame: NSRect(x: 0, y: 0, width: panelWidth, height: panelHeight))
+        let containerView = OpenClickyGlassContainerView(frame: NSRect(x: 0, y: 0, width: panelWidth, height: panelHeight))
         containerView.autoresizingMask = [.width, .height]
         containerView.wantsLayer = true
         containerView.layer?.backgroundColor = .clear

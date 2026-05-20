@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 import UniformTypeIdentifiers
 
@@ -617,6 +618,11 @@ struct OpenClickyNotchPanelView: View {
                 .accessibilityLabel("Show \(tab.title)")
                 .help("Show \(tab.title)")
             }
+
+            OpenClickyPanelDragHandle()
+                .frame(width: 34, height: 30)
+                .accessibilityLabel("Drag OpenClicky panel")
+                .help("Drag OpenClicky panel")
 
             panelChromeButton(
                 systemImageName: selectedTab == .settings ? "gearshape.fill" : "gearshape",
@@ -3045,6 +3051,58 @@ private struct OpenClickyNotchMetricCard: View {
             RoundedRectangle(cornerRadius: 16, style: .continuous)
                 .stroke(isSelected ? color.opacity(0.50) : color.opacity(0.18), lineWidth: isSelected ? 1.2 : 1)
         )
+    }
+}
+
+private struct OpenClickyPanelDragHandle: NSViewRepresentable {
+    func makeNSView(context: Context) -> OpenClickyPanelDragHandleView {
+        OpenClickyPanelDragHandleView()
+    }
+
+    func updateNSView(_ nsView: OpenClickyPanelDragHandleView, context: Context) {}
+}
+
+private final class OpenClickyPanelDragHandleView: NSView {
+    override var isFlipped: Bool { true }
+    override var mouseDownCanMoveWindow: Bool { true }
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+    }
+
+    required init?(coder: NSCoder) {
+        nil
+    }
+
+    override func resetCursorRects() {
+        addCursorRect(bounds, cursor: .openHand)
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        NSCursor.closedHand.set()
+        window?.performDrag(with: event)
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let rect = bounds.insetBy(dx: 2, dy: 1)
+        let path = NSBezierPath(roundedRect: rect, xRadius: 15, yRadius: 15)
+        NSColor.white.withAlphaComponent(0.055).setFill()
+        path.fill()
+        NSColor.white.withAlphaComponent(0.085).setStroke()
+        path.lineWidth = 1
+        path.stroke()
+
+        let lineColor = NSColor.white.withAlphaComponent(0.34)
+        lineColor.setStroke()
+        for yOffset in [-4.0, 0.0, 4.0] {
+            let line = NSBezierPath()
+            line.move(to: NSPoint(x: rect.midX - 6, y: rect.midY + yOffset))
+            line.line(to: NSPoint(x: rect.midX + 6, y: rect.midY + yOffset))
+            line.lineWidth = 1.5
+            line.lineCapStyle = .round
+            line.stroke()
+        }
     }
 }
 

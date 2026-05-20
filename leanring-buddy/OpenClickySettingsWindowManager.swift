@@ -88,7 +88,7 @@ final class OpenClickySettingsWindowManager {
         settingsWindow.collectionBehavior.insert(.fullScreenAuxiliary)
         settingsWindow.center()
 
-        let containerView = NSView(frame: NSRect(origin: .zero, size: windowSize))
+        let containerView = OpenClickyGlassContainerView(frame: NSRect(origin: .zero, size: windowSize))
         containerView.autoresizingMask = [.width, .height]
         containerView.wantsLayer = true
         containerView.layer?.backgroundColor = NSColor.clear.cgColor
