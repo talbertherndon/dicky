@@ -476,7 +476,7 @@ struct OpenClickyNotchPanelView: View {
                 return 430
             }
             if hasHomeConversationActivity {
-                return 340
+                return 560
             }
             return 560
         case .agents:
@@ -653,7 +653,7 @@ struct OpenClickyNotchPanelView: View {
                     if quickPromptMode == .chat && isCompactChatExpanded {
                         compactChatPane
                             .transition(.opacity.combined(with: .move(edge: .top)))
-                    } else if !hasHomeConversationActivity {
+                    } else {
                         homePromptSuggestions
                     }
 
