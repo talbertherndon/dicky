@@ -960,12 +960,11 @@ final class OpenClickyNotchCaptureWindowManager {
         }
 
         if animated {
+            updateHostingFrame()
             NSAnimationContext.runAnimationGroup { context in
                 context.duration = 0.18
                 context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
                 mainPanel.animator().setFrame(targetFrame, display: true)
-            } completionHandler: {
-                updateHostingFrame()
             }
         } else {
             mainPanel.setFrame(targetFrame, display: true, animate: false)
