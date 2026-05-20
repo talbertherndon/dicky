@@ -13,7 +13,7 @@ import Combine
 @MainActor
 final class OpenClickyAgentStore: ObservableObject {
   static let shared = OpenClickyAgentStore()
-  static let skillDiscoveryAgentSlug = "skill-discovery"
+  nonisolated static let skillDiscoveryAgentSlug = "skill-discovery"
 
   @Published private(set) var agents: [OpenClickyAgentDefinition] = []
 
