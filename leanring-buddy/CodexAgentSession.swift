@@ -18,6 +18,8 @@ actor OpenClickyAgentFileLeaseCoordinator {
         let claimedPaths: [String]
         let conflicts: [LeaseConflict]
         let activeClaims: [String]
+        let waitedForConflicts: Bool
+        let waitTimedOut: Bool
     }
 
     private struct LeaseRecord {
@@ -30,8 +32,29 @@ actor OpenClickyAgentFileLeaseCoordinator {
     private var pathsBySession: [UUID: Set<String>] = [:]
 
     func claimPaths(_ paths: [String], for sessionID: UUID, title: String) -> LeaseSummary {
+        claimAvailablePaths(Array(Set(paths.map(Self.normalizedPath))).sorted(), for: sessionID, title: title, waitedForConflicts: false, waitTimedOut: false)
+    }
+
+    func claimPathsWaitingForRelease(_ paths: [String], for sessionID: UUID, title: String, timeout: TimeInterval = 900, pollInterval: TimeInterval = 2) async -> LeaseSummary {
         releaseLeases(for: sessionID)
         let uniquePaths = Array(Set(paths.map(Self.normalizedPath))).sorted()
+        let deadline = Date().addingTimeInterval(timeout)
+        var waitedForConflicts = false
+
+        while !conflicts(for: uniquePaths, excluding: sessionID).isEmpty {
+            waitedForConflicts = true
+            guard Date() < deadline else {
+                return claimAvailablePaths(uniquePaths, for: sessionID, title: title, waitedForConflicts: true, waitTimedOut: true)
+            }
+            let nanoseconds = UInt64(max(0.25, pollInterval) * 1_000_000_000)
+            try? await Task.sleep(nanoseconds: nanoseconds)
+        }
+
+        return claimAvailablePaths(uniquePaths, for: sessionID, title: title, waitedForConflicts: waitedForConflicts, waitTimedOut: false)
+    }
+
+    private func claimAvailablePaths(_ uniquePaths: [String], for sessionID: UUID, title: String, waitedForConflicts: Bool, waitTimedOut: Bool) -> LeaseSummary {
+        releaseLeases(for: sessionID)
         var claimedPaths: [String] = []
         var conflicts: [LeaseConflict] = []
 
@@ -46,7 +69,20 @@ actor OpenClickyAgentFileLeaseCoordinator {
             claimedPaths.append(path)
         }
 
-        return LeaseSummary(claimedPaths: claimedPaths, conflicts: conflicts, activeClaims: activeClaimLines(excluding: sessionID))
+        return LeaseSummary(
+            claimedPaths: claimedPaths,
+            conflicts: conflicts,
+            activeClaims: activeClaimLines(excluding: sessionID),
+            waitedForConflicts: waitedForConflicts,
+            waitTimedOut: waitTimedOut
+        )
+    }
+
+    private func conflicts(for paths: [String], excluding sessionID: UUID) -> [LeaseConflict] {
+        paths.compactMap { path in
+            guard let existing = leasesByPath[path], existing.sessionID != sessionID else { return nil }
+            return LeaseConflict(path: path, ownerSessionID: existing.sessionID, ownerTitle: existing.sessionTitle)
+        }
     }
 
     func coordinationSnapshot(excluding sessionID: UUID? = nil) -> [String] {
@@ -1067,7 +1103,7 @@ final class CodexAgentSession: ObservableObject, Identifiable {
             await OpenClickyAgentFileLeaseCoordinator.shared.releaseLeases(for: id)
             leaseSummary = nil
         } else {
-            let claimed = await OpenClickyAgentFileLeaseCoordinator.shared.claimPaths(mentionedPaths, for: id, title: title)
+            let claimed = await OpenClickyAgentFileLeaseCoordinator.shared.claimPathsWaitingForRelease(mentionedPaths, for: id, title: title)
             currentLeasePaths = claimed.claimedPaths
             leaseSummary = claimed
         }
@@ -1095,11 +1131,16 @@ final class CodexAgentSession: ObservableObject, Identifiable {
             let conflicts = leaseSummary.conflicts.map { conflict in
                 "- \(conflict.path) (currently held by \(conflict.ownerTitle))"
             }.joined(separator: "\n")
+            let timeoutNote = leaseSummary.waitTimedOut
+                ? " OpenClicky already waited for the lease to clear, but it is still active."
+                : ""
             conflictSection = "  - Potential ownership conflicts detected:\n"
                 + conflicts
-                + "\n  - Do not edit conflicting files in this run; choose non-overlapping files or return blocked."
+                + "\n  -\(timeoutNote) Do not edit conflicting files; wait for the lease to be released, then re-check before patching."
+        } else if let leaseSummary, leaseSummary.waitedForConflicts {
+            conflictSection = "  - OpenClicky waited for the previous file lease to be released before claiming these files. Re-check the target file immediately before patching."
         } else {
-            conflictSection = "  - If scope changes or exact files become clear, avoid editing files owned by another running agent."
+            conflictSection = "  - If scope changes or exact files become clear, avoid editing files owned by another running agent; wait for the lease to be released before patching."
         }
 
         return """
@@ -1107,7 +1148,7 @@ final class CodexAgentSession: ObservableObject, Identifiable {
           - Multiple OpenClicky agents may share the same working directory even though each has its own Codex runtime, process, and thread.
           - Before editing, run `git status --short` and inspect target files so you preserve uncommitted work from other agents.
           - Re-read a file immediately before patching it, and never replace whole files or reset changes unless the user explicitly asked for that destructive action.
-          - Prefer small patches that merge with existing edits; if another agent owns or is clearly editing the same file, stop and report the conflict.
+          - Prefer small patches that merge with existing edits; if another agent owns or is clearly editing the same file, wait until the lease is released before patching.
         \(activeClaimsSection)
         \(claimedSection)
         \(conflictSection)

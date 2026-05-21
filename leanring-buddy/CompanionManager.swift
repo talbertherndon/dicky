@@ -2520,7 +2520,7 @@ final class CompanionManager: ObservableObject {
 
     /// Mark a session as archived. Keeps the session alive so its transcript and state
     /// are preserved; the sidebar groups archived sessions under a separate header.
-    func archiveSession(_ sessionID: UUID) {
+    func archiveSession(_ sessionID: UUID, allowIncomplete: Bool = false) {
         guard let session = codexAgentSessions.first(where: { $0.id == sessionID }) else { return }
         let isActivelyRunning: Bool = {
             switch session.status {
@@ -2538,6 +2538,19 @@ final class CompanionManager: ObservableObject {
                 fields: [
                     "sessionID": sessionID.uuidString,
                     "title": session.title
+                ]
+            )
+            return
+        }
+        guard allowIncomplete || session.progressStage == .completed else {
+            OpenClickyMessageLogStore.shared.append(
+                lane: "agent",
+                direction: "incoming",
+                event: "openclicky.agent_task.archive_blocked_incomplete",
+                fields: [
+                    "sessionID": sessionID.uuidString,
+                    "title": session.title,
+                    "progressStage": session.progressStage.label
                 ]
             )
             return

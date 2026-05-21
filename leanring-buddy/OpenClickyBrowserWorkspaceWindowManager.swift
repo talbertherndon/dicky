@@ -36,7 +36,7 @@ final class OpenClickyBrowserWorkspaceWindowManager {
 
     private func makeWindow(initialURL: URL?, companionManager: CompanionManager) -> NSWindow {
         let content = OpenClickyBrowserWorkspaceView(initialURL: initialURL, companionManager: companionManager)
-        let hostingView = NSHostingView(rootView: content)
+        let hostingView = OpenClickyBrowserWorkspaceHostingView(rootView: content)
         hostingView.wantsLayer = true
         hostingView.layer?.backgroundColor = NSColor.clear.cgColor
 
@@ -73,7 +73,7 @@ final class OpenClickyBrowserWorkspaceWindowManager {
         window.titlebarAppearsTransparent = true
         window.toolbar = nil
         window.toolbarStyle = .unifiedCompact
-        window.isMovableByWindowBackground = true
+        window.isMovableByWindowBackground = false
         window.standardWindowButton(.closeButton)?.isHidden = true
         window.standardWindowButton(.miniaturizeButton)?.isHidden = true
         window.standardWindowButton(.zoomButton)?.isHidden = true
@@ -102,6 +102,40 @@ final class OpenClickyBrowserWorkspaceWindowManager {
     }
 }
 
+private final class OpenClickyBrowserWorkspaceHostingView<Content: View>: NSHostingView<Content> {
+    // Browser content, tabs, split handles, and chat controls own their own
+    // gestures. The window only moves from the explicit top drag strip.
+    override var mouseDownCanMoveWindow: Bool { false }
+}
+
+private struct OpenClickyBrowserWindowDragRegion: NSViewRepresentable {
+    func makeNSView(context: Context) -> OpenClickyBrowserWindowDragRegionView {
+        OpenClickyBrowserWindowDragRegionView(frame: .zero)
+    }
+
+    func updateNSView(_ nsView: OpenClickyBrowserWindowDragRegionView, context: Context) {}
+}
+
+private final class OpenClickyBrowserWindowDragRegionView: NSView {
+    override var mouseDownCanMoveWindow: Bool { false }
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+        layer?.backgroundColor = NSColor.clear.cgColor
+    }
+
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        wantsLayer = true
+        layer?.backgroundColor = NSColor.clear.cgColor
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        window?.performDrag(with: event)
+    }
+}
+
 private struct OpenClickyBrowserWorkspaceView: View {
     @StateObject private var model: OpenClickyBrowserWorkspaceModel
     @State private var selectedSpecialist: OpenClickyBrowserSpecialist = .researcher
@@ -111,6 +145,7 @@ private struct OpenClickyBrowserWorkspaceView: View {
     @State private var isChatCollapsed = false
     @State private var isSplitDropTargeted = false
     @State private var isChatDropTargeted = false
+    @State private var draggingTabID: UUID?
     @AppStorage(AppBundleConfiguration.userThemeDefaultsKey) private var selectedThemeRawValue = ClickyTheme.system.rawValue
     @AppStorage(ClickyAccentTheme.userDefaultsKey) private var selectedAccentRawValue = ClickyAccentTheme.blue.rawValue
     @AppStorage(AppBundleConfiguration.userGlassOpacityDefaultsKey) private var glassOpacity = 0.75
@@ -140,7 +175,7 @@ private struct OpenClickyBrowserWorkspaceView: View {
     }
 
     var body: some View {
-        HStack(alignment: .top, spacing: 6) {
+        HStack(alignment: .top, spacing: 0) {
             VStack(spacing: 6) {
                 toolbar
                 browserWorkspacePanel
@@ -171,6 +206,13 @@ private struct OpenClickyBrowserWorkspaceView: View {
             )
         )
         .background(.ultraThinMaterial)
+        .ignoresSafeArea(.container, edges: .top)
+        .overlay(alignment: .top) {
+            OpenClickyBrowserWindowDragRegion()
+                .frame(height: 8)
+                .padding(.horizontal, 44)
+                .help("Drag to move Browser Workspace")
+        }
     }
 
     private var backgroundOpacity: Double {
@@ -326,7 +368,9 @@ private struct OpenClickyBrowserWorkspaceView: View {
 
     private var toolbar: some View {
         VStack(spacing: 0) {
-            HStack(spacing: 10) {
+            HStack(spacing: 8) {
+                browserWindowCloseButton
+
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 8) {
                         ForEach(model.tabs) { tab in
@@ -342,9 +386,9 @@ private struct OpenClickyBrowserWorkspaceView: View {
                     }
                 }
             }
-            .padding(.leading, 58)
+            .padding(.leading, 8)
             .padding(.trailing, 230)
-            .padding(.top, 1)
+            .padding(.top, 0)
             .padding(.bottom, 4)
 
             HStack(spacing: 10) {
@@ -376,34 +420,65 @@ private struct OpenClickyBrowserWorkspaceView: View {
         .padding(.top, 1)
     }
 
+    private var browserWindowCloseButton: some View {
+        Button(action: { OpenClickyBrowserWorkspaceWindowManager.shared.close() }) {
+            Image(systemName: "xmark")
+                .font(.system(size: 12, weight: .bold))
+                .foregroundStyle(DS.Colors.textPrimary.opacity(0.70))
+                .frame(width: 30, height: 30)
+                .background(Circle().fill(glassInsetFill.opacity(0.82)))
+                .overlay(Circle().stroke(glassBorder))
+        }
+        .buttonStyle(.plain)
+        .help("Close Browser Workspace")
+    }
+
     private func tabButton(_ tab: OpenClickyBrowserTab) -> some View {
         HStack(spacing: 6) {
-            Image(systemName: tab.currentURL?.isFileURL == true ? "doc" : "globe").font(.caption)
-            Text(tab.title).lineLimit(1)
-            if model.splitTabID == tab.id {
-                Image(systemName: "rectangle.split.2x1").font(.caption2.weight(.bold)).foregroundStyle(DS.Colors.accentText)
-            }
-            Button(action: { model.closeTab(tab.id) }) {
-                Image(systemName: "xmark").font(.system(size: 9, weight: .bold)).opacity(0.55)
+            Button(action: { model.activateTab(tab.id) }) {
+                HStack(spacing: 6) {
+                    Image(systemName: tab.currentURL?.isFileURL == true ? "doc" : "globe").font(.caption)
+                    Text(tab.title).lineLimit(1)
+                    if model.splitTabID == tab.id {
+                        Image(systemName: "rectangle.split.2x1").font(.caption2.weight(.bold)).foregroundStyle(DS.Colors.accentText)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
+            .onDrag {
+                draggingTabID = tab.id
+                return NSItemProvider(object: tab.id.uuidString as NSString)
+            }
+            .help("Click to activate. Drag across tabs to reorder, or drag into the page to split this tab.")
+
+            Button(action: { model.closeTab(tab.id) }) {
+                Image(systemName: "xmark")
+                    .font(.system(size: 9, weight: .bold))
+                    .opacity(0.55)
+                    .frame(width: 16, height: 16)
+                    .contentShape(Circle())
+            }
+            .buttonStyle(.plain)
+            .help("Close tab")
         }
         .font(.system(size: 12, weight: .semibold))
         .foregroundStyle(model.activeTabID == tab.id ? Color.white : Color.white.opacity(0.70))
-        .padding(.horizontal, 11)
+        .padding(.leading, 11)
+        .padding(.trailing, 7)
         .padding(.vertical, 7)
-        .frame(maxWidth: 210)
+        .frame(width: 210)
         .background(RoundedRectangle(cornerRadius: 10).fill(model.activeTabID == tab.id ? DS.Colors.accent.opacity(0.18 + glassFrosting * 0.08) : glassInsetFill.opacity(0.75)))
         .overlay(RoundedRectangle(cornerRadius: 10).stroke(model.activeTabID == tab.id ? accentBorder : glassBorder))
-        .onTapGesture { model.activateTab(tab.id) }
-        .onDrag { NSItemProvider(object: tab.id.uuidString as NSString) }
-        .help("Click to activate. Drag into the page to split this tab.")
+        .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .onDrop(of: [UTType.text.identifier], delegate: OpenClickyBrowserTabDropDelegate(destinationTabID: tab.id, draggingTabID: $draggingTabID, model: model))
     }
 
     private var chatResizeHandle: some View {
         Rectangle()
             .fill(Color.white.opacity(0.001))
-            .frame(width: 8)
+            .frame(width: 6)
             .contentShape(Rectangle())
             .gesture(
                 DragGesture(minimumDistance: 0)
@@ -755,26 +830,56 @@ private struct OpenClickyBrowserWorkspaceView: View {
 
 
     private var selectionChips: some View {
-        let count = model.inspectorSelections.count
-        let latest = model.inspectorSelections.last
-        return Button(action: { composerText += " @selections" }) {
-            HStack(spacing: 7) {
-                Image(systemName: "cursorarrow.rays")
-                Text(count == 1 ? "1 selection" : "\(count) selections")
-                if let latest {
-                    Text("Latest #\(latest.order)")
-                        .foregroundStyle(.secondary)
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                ForEach(model.inspectorSelections) { selection in
+                    inspectorSelectionChip(selection)
+                }
+                if model.inspectorSelections.count > 1 {
+                    Button(action: model.clearInspectorSelections) {
+                        Label("Clear", systemImage: "xmark.circle")
+                            .font(.caption.weight(.bold))
+                            .lineLimit(1)
+                    }
+                    .buttonStyle(.plain)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 7)
+                    .background(RoundedRectangle(cornerRadius: 10).fill(glassInsetFill))
+                    .overlay(RoundedRectangle(cornerRadius: 10).stroke(glassBorder))
+                    .help("Remove all Inspector selections")
                 }
             }
-            .font(.caption.weight(.bold))
-            .lineLimit(1)
         }
-        .buttonStyle(.plain)
+    }
+
+    private func inspectorSelectionChip(_ selection: OpenClickyBrowserInspectorSelection) -> some View {
+        HStack(spacing: 6) {
+            Button(action: { composerText += " @selection\(selection.order)" }) {
+                HStack(spacing: 6) {
+                    Image(systemName: "cursorarrow.rays")
+                    Text("#\(selection.order)")
+                    Text(selection.label)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+                .font(.caption.weight(.bold))
+                .lineLimit(1)
+            }
+            .buttonStyle(.plain)
+
+            Button(action: { model.removeInspectorSelection(selection) }) {
+                Image(systemName: "xmark.circle.fill")
+                    .font(.caption.weight(.bold))
+                    .foregroundStyle(.secondary)
+            }
+            .buttonStyle(.plain)
+            .help("Remove this Inspector selection")
+        }
         .padding(.horizontal, 10)
         .padding(.vertical, 7)
         .background(RoundedRectangle(cornerRadius: 10).fill(DS.Colors.accent.opacity(0.18)))
         .overlay(RoundedRectangle(cornerRadius: 10).stroke(accentBorder))
-        .help(model.inspectorSelectionSummary)
+        .help(selection.detail)
     }
 
     private var attachmentChips: some View {
@@ -932,6 +1037,22 @@ private struct OpenClickyBrowserWorkspaceView: View {
         guard !prompt.isEmpty else { return }
         model.sendBrowserMessage(prompt, specialist: selectedSpecialist)
         composerText = ""
+    }
+}
+
+private struct OpenClickyBrowserTabDropDelegate: DropDelegate {
+    let destinationTabID: UUID
+    @Binding var draggingTabID: UUID?
+    let model: OpenClickyBrowserWorkspaceModel
+
+    func dropEntered(info: DropInfo) {
+        guard let draggingTabID else { return }
+        model.moveTab(draggingTabID, relativeTo: destinationTabID, placeAfter: info.location.x > 105)
+    }
+
+    func performDrop(info: DropInfo) -> Bool {
+        draggingTabID = nil
+        return true
     }
 }
 
@@ -1112,6 +1233,7 @@ private final class OpenClickyBrowserWorkspaceModel: ObservableObject, OpenClick
         guard let tab = tab(for: tabID) else { return }
         activeTabID = tabID
         addressText = tab.addressText
+        if isInspectorModeEnabled { applyInspectorMode() }
     }
 
     func addTab() {
@@ -1134,6 +1256,18 @@ private final class OpenClickyBrowserWorkspaceModel: ObservableObject, OpenClick
         if closingActiveTab {
             activateTab(tabs[0].id)
         }
+    }
+
+    func moveTab(_ movingTabID: UUID, relativeTo destinationTabID: UUID, placeAfter: Bool) {
+        guard movingTabID != destinationTabID,
+              let fromIndex = tabs.firstIndex(where: { $0.id == movingTabID }) else { return }
+        let movingTab = tabs.remove(at: fromIndex)
+        guard let destinationIndex = tabs.firstIndex(where: { $0.id == destinationTabID }) else {
+            tabs.insert(movingTab, at: fromIndex)
+            return
+        }
+        let insertIndex = min(destinationIndex + (placeAfter ? 1 : 0), tabs.count)
+        tabs.insert(movingTab, at: insertIndex)
     }
 
     func splitActiveTab() {
@@ -1184,6 +1318,9 @@ private final class OpenClickyBrowserWorkspaceModel: ObservableObject, OpenClick
             tab.errorText = nil
         }
         refreshPageContext(for: tabID, trigger: "Navigation finished")
+        if isInspectorModeEnabled, tabID == activeTabID {
+            applyInspectorMode()
+        }
     }
 
     func loadAddress() {
@@ -1302,21 +1439,67 @@ private final class OpenClickyBrowserWorkspaceModel: ObservableObject, OpenClick
 
     private func applyInspectorMode() {
         guard let webView = webViews[activeTabID] else { return }
-        let script = Self.inspectorModeScript(enabled: isInspectorModeEnabled, nextOrder: inspectorSelections.count + 1)
+        let nextOrder = (inspectorSelections.map(\.order).max() ?? 0) + 1
+        let script = Self.inspectorModeScript(
+            enabled: isInspectorModeEnabled,
+            nextOrder: nextOrder,
+            selectedSelectors: inspectorSelections.map(\.selector)
+        )
         webView.evaluateJavaScript(script, completionHandler: nil)
     }
 
     func recordInspectorSelection(_ payload: [String: Any]) {
-        let order = payload["order"] as? Int ?? inspectorSelections.count + 1
+        let selector = payload["selector"] as? String ?? "unknown"
+        let sourceURL = payload["sourceURL"] as? String ?? activeTab.currentURL?.absoluteString ?? "open-clicky://welcome"
+        if payload["action"] as? String == "remove" {
+            inspectorSelections.removeAll { $0.selector == selector && $0.sourceURL == sourceURL }
+            return
+        }
+        if inspectorSelections.contains(where: { $0.selector == selector && $0.sourceURL == sourceURL }) {
+            inspectorSelections.removeAll { $0.selector == selector && $0.sourceURL == sourceURL }
+            return
+        }
+        let order = payload["order"] as? Int ?? ((inspectorSelections.map(\.order).max() ?? 0) + 1)
         let selection = OpenClickyBrowserInspectorSelection(
             order: order,
-            selector: payload["selector"] as? String ?? "unknown",
+            selector: selector,
             tagName: payload["tagName"] as? String ?? "element",
             text: payload["text"] as? String ?? "",
             comment: payload["comment"] as? String ?? "",
-            sourceURL: payload["sourceURL"] as? String ?? activeTab.currentURL?.absoluteString ?? "open-clicky://welcome"
+            sourceURL: sourceURL
         )
         inspectorSelections.append(selection)
+    }
+
+    func removeInspectorSelection(_ selection: OpenClickyBrowserInspectorSelection) {
+        inspectorSelections.removeAll { $0.id == selection.id }
+        removeInspectorSelectionHighlight(selector: selection.selector)
+    }
+
+    func clearInspectorSelections() {
+        inspectorSelections.removeAll()
+        removeInspectorSelectionHighlight(selector: nil)
+    }
+
+    private func removeInspectorSelectionHighlight(selector: String?) {
+        guard let webView = webViews[activeTabID] else { return }
+        let selectorLiteral: String
+        if let selector,
+           let data = try? JSONSerialization.data(withJSONObject: selector, options: [.fragmentsAllowed]),
+           let encoded = String(data: data, encoding: .utf8) {
+            selectorLiteral = encoded
+        } else {
+            selectorLiteral = "null"
+        }
+        let script = """
+        (() => {
+          const selector = \(selectorLiteral);
+          if (!window.__openClickyInspectorRemoveSelection) return false;
+          window.__openClickyInspectorRemoveSelection(selector);
+          return true;
+        })();
+        """
+        webView.evaluateJavaScript(script, completionHandler: nil)
     }
 
     var inspectorSelectionSummary: String {
@@ -1340,13 +1523,17 @@ private final class OpenClickyBrowserWorkspaceModel: ObservableObject, OpenClick
                         url = item as? URL
                     }
                     guard let url else { return }
-                    Task { @MainActor in self?.addAttachment(url: url) }
+                    Task { @MainActor [weak self, url] in
+                        self?.addAttachment(url: url)
+                    }
                 }
             } else if provider.canLoadObject(ofClass: NSString.self) {
                 accepted = true
                 provider.loadObject(ofClass: NSString.self) { [weak self] object, _ in
                     guard let text = object as? String else { return }
-                    Task { @MainActor in self?.addAttachment(text: text) }
+                    Task { @MainActor [weak self, text] in
+                        self?.addAttachment(text: text)
+                    }
                 }
             }
         }
@@ -1390,13 +1577,21 @@ private final class OpenClickyBrowserWorkspaceModel: ObservableObject, OpenClick
         messages.append(OpenClickyBrowserChatMessage(role: "OpenClicky", text: "Attached dropped text to this workspace chat.", isUser: false))
     }
 
-    private static func inspectorModeScript(enabled: Bool, nextOrder: Int) -> String {
+    private static func inspectorModeScript(enabled: Bool, nextOrder: Int, selectedSelectors: [String]) -> String {
         let enabledLiteral = enabled ? "true" : "false"
+        let selectedSelectorsLiteral: String
+        if let data = try? JSONSerialization.data(withJSONObject: selectedSelectors),
+           let encoded = String(data: data, encoding: .utf8) {
+            selectedSelectorsLiteral = encoded
+        } else {
+            selectedSelectorsLiteral = "[]"
+        }
         return """
         (() => {
           window.__openClickyInspectorOrder = \(nextOrder);
           const existing = window.__openClickyInspector;
           if (existing && existing.cleanup) existing.cleanup();
+          window.__openClickyInspectorSelectedSelectors = new Set(\(selectedSelectorsLiteral));
           const clearTransientUI = () => {
             document.getElementById('open-clicky-inspector-hover')?.remove();
             document.getElementById('open-clicky-inspector-comment')?.remove();
@@ -1442,6 +1637,19 @@ private final class OpenClickyBrowserWorkspaceModel: ObservableObject, OpenClick
             }
             return parts.join(' > ');
           };
+          const removeSelection = (selector) => {
+            const nodes = document.querySelectorAll('.open-clicky-inspector-overlay.locked, .open-clicky-inspector-badge');
+            nodes.forEach((node) => {
+              if (!selector || node.dataset.openClickySelector === selector) node.remove();
+            });
+            if (selector) {
+              window.__openClickyInspectorSelectedSelectors.delete(selector);
+            } else {
+              window.__openClickyInspectorSelectedSelectors.clear();
+            }
+            document.getElementById('open-clicky-inspector-comment')?.remove();
+          };
+          window.__openClickyInspectorRemoveSelection = removeSelection;
           const hoverBox = document.createElement('div');
           hoverBox.id = 'open-clicky-inspector-hover';
           hoverBox.className = 'open-clicky-inspector-overlay';
@@ -1489,8 +1697,11 @@ private final class OpenClickyBrowserWorkspaceModel: ObservableObject, OpenClick
               badge.textContent = '#' + order;
               badge.style.left = `${rect.left + window.scrollX}px`;
               badge.style.top = `${Math.max(0, rect.top + window.scrollY - 22)}px`;
+              badge.dataset.openClickySelector = selector;
               document.body.appendChild(badge);
               lockedBox.dataset.openClickyOrder = String(order);
+              lockedBox.dataset.openClickySelector = selector;
+              window.__openClickyInspectorSelectedSelectors.add(selector);
               const payload = { order, selector, tagName: el.tagName.toLowerCase(), text: String(el.innerText || el.value || el.alt || '').replace(/\\s+/g, ' ').trim().slice(0, 240), comment, sourceURL: location.href };
               window.webkit?.messageHandlers?.openClickyInspector?.postMessage(payload);
               panel.remove();
@@ -1508,6 +1719,12 @@ private final class OpenClickyBrowserWorkspaceModel: ObservableObject, OpenClick
             if (isInspectorUI(event.target)) return;
             event.preventDefault(); event.stopPropagation();
             const el = event.target;
+            const selector = selectorFor(el);
+            if (window.__openClickyInspectorSelectedSelectors.has(selector)) {
+              removeSelection(selector);
+              window.webkit?.messageHandlers?.openClickyInspector?.postMessage({ action: 'remove', selector, sourceURL: location.href });
+              return;
+            }
             const rect = el.getBoundingClientRect();
             const order = window.__openClickyInspectorOrder++;
             const lockedBox = document.createElement('div');
@@ -1529,6 +1746,8 @@ private final class OpenClickyBrowserWorkspaceModel: ObservableObject, OpenClick
             document.removeEventListener('click', clickHandler, true);
             document.removeEventListener('keydown', keyHandler, true);
             clearTransientUI();
+            removeSelection(null);
+            delete window.__openClickyInspectorRemoveSelection;
             document.body && document.body.classList.remove('open-clicky-inspecting');
           } };
           return true;
@@ -1643,6 +1862,10 @@ private final class OpenClickyBrowserWorkspaceModel: ObservableObject, OpenClick
         refreshPageContext(for: activeTabID, trigger: "Message send")
         messages.append(OpenClickyBrowserChatMessage(role: "You", text: prompt, isUser: true))
 
+        if handleBrowserSlashCommand(prompt) {
+            return
+        }
+
         if let browserPlan = OpenClickyBrowserResearchPlan(prompt: prompt) {
             performBrowserResearchPlan(browserPlan)
             return
@@ -1695,6 +1918,30 @@ private final class OpenClickyBrowserWorkspaceModel: ObservableObject, OpenClick
         linkedAgentSessionID = session.id
         linkedAgentSummary = "Started \(session.title). Future page-chat messages continue in that same task."
         messages.append(OpenClickyBrowserChatMessage(role: "OpenClicky", text: "Started a linked OpenClicky Agent Mode task for this page. Future messages in this workspace will continue that same task with fresh page context.", isUser: false))
+    }
+
+
+    private func handleBrowserSlashCommand(_ prompt: String) -> Bool {
+        let normalized = prompt.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard normalized.hasPrefix("/") else { return false }
+
+        switch normalized {
+        case "/inspect", "/inspector":
+            toggleInspectorMode()
+            messages.append(
+                OpenClickyBrowserChatMessage(
+                    role: "OpenClicky",
+                    text: isInspectorModeEnabled ? "Inspector mode is on. Click a page element, add an optional note, then save it into this chat." : "Inspector mode is off.",
+                    isUser: false
+                )
+            )
+            return true
+        case "/clear":
+            clearChat()
+            return true
+        default:
+            return false
+        }
     }
 
     private func performBrowserResearchPlan(_ plan: OpenClickyBrowserResearchPlan) {

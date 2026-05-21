@@ -172,6 +172,7 @@ struct OpenClickyNotchPanelView: View {
     @State private var expandedAgentAttachments: [PanelDraftAttachment] = []
     @State private var isExpandedAgentDropTargeted = false
     @State private var pendingStopAgentSessionID: UUID?
+    @State private var pendingArchiveAgentSessionID: UUID?
     @State private var gogStatus: OpenClickyGogCLIStatus = .unknown
     @State private var hasLoadedGogStatus = false
     @FocusState private var isQuickPromptFocused: Bool
@@ -377,6 +378,17 @@ struct OpenClickyNotchPanelView: View {
         )
     }
 
+    private var archiveTaskDialogBinding: Binding<Bool> {
+        Binding(
+            get: { pendingArchiveAgentSessionID != nil },
+            set: { isPresented in
+                if !isPresented {
+                    pendingArchiveAgentSessionID = nil
+                }
+            }
+        )
+    }
+
     private func panelDialogs<Content: View>(_ content: Content) -> some View {
         content
         .sheet(isPresented: $isShowingHatchSheet) {
@@ -395,6 +407,20 @@ struct OpenClickyNotchPanelView: View {
             }
         } message: {
             Text("Running tasks cannot be archived. Stop it first if you want to move it out of the active list.")
+        }
+        .confirmationDialog(
+            "Archive this incomplete OpenClicky task?",
+            isPresented: archiveTaskDialogBinding,
+            titleVisibility: .visible
+        ) {
+            Button("Archive incomplete task", role: .destructive) {
+                confirmArchivePendingAgentSession()
+            }
+            Button("Keep active", role: .cancel) {
+                pendingArchiveAgentSessionID = nil
+            }
+        } message: {
+            Text("This task is paused, stopped, or has not finished cleanly. Completed tasks archive immediately; incomplete tasks need confirmation so active work is not hidden by mistake.")
         }
     }
 
@@ -1229,6 +1255,33 @@ struct OpenClickyNotchPanelView: View {
         }
     }
 
+    private func requestArchiveAgentSession(_ session: CodexAgentSession) {
+        guard !isAgentSessionRunning(session) else {
+            pendingStopAgentSessionID = session.id
+            return
+        }
+        guard session.progressStage == .completed else {
+            pendingArchiveAgentSessionID = session.id
+            return
+        }
+        archiveAgentSession(session.id, allowIncomplete: false)
+    }
+
+    private func archiveAgentSession(_ sessionID: UUID, allowIncomplete: Bool) {
+        withAnimation(.spring(response: 0.24, dampingFraction: 0.86)) {
+            if expandedAgentSessionID == sessionID {
+                expandedAgentSessionID = nil
+            }
+            companionManager.archiveSession(sessionID, allowIncomplete: allowIncomplete)
+        }
+    }
+
+    private func confirmArchivePendingAgentSession() {
+        guard let sessionID = pendingArchiveAgentSessionID else { return }
+        pendingArchiveAgentSessionID = nil
+        archiveAgentSession(sessionID, allowIncomplete: true)
+    }
+
     private func confirmStopPendingAgentSession() {
         guard let sessionID = pendingStopAgentSessionID else { return }
         pendingStopAgentSessionID = nil
@@ -1993,12 +2046,7 @@ struct OpenClickyNotchPanelView: View {
                         accessibilityLabel: "Archive task \(session.title)",
                         helpText: "Archive this OpenClicky task"
                     ) {
-                        withAnimation(.spring(response: 0.24, dampingFraction: 0.86)) {
-                            if expandedAgentSessionID == session.id {
-                                expandedAgentSessionID = nil
-                            }
-                            companionManager.archiveSession(session.id)
-                        }
+                        requestArchiveAgentSession(session)
                     }
                 }
             }
@@ -2024,13 +2072,14 @@ struct OpenClickyNotchPanelView: View {
         systemImageName: String,
         accessibilityLabel: String,
         helpText: String,
-        foregroundColor: Color = DS.Colors.textSecondary,
+        foregroundColor: Color? = nil,
         action: @escaping () -> Void
     ) -> some View {
-        Button(action: action) {
+        let resolvedForegroundColor = foregroundColor ?? DS.Colors.textSecondary
+        return Button(action: action) {
             Image(systemName: systemImageName)
                 .font(panelUIFont(size: 13, weight: .black))
-                .foregroundColor(foregroundColor)
+                .foregroundColor(resolvedForegroundColor)
                 .frame(width: 30, height: 30)
                 .background(
                     Circle()

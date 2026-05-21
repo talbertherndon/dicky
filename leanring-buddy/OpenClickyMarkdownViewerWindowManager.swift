@@ -116,7 +116,7 @@ private struct OpenClickyMarkdownViewerView: View {
         }
         .background(Color.clear)
         .onAppear(perform: loadDocument)
-        .onChange(of: fileURL) { _ in
+        .onChange(of: fileURL) { _, _ in
             loadDocument()
         }
     }
