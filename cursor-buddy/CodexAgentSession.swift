@@ -1063,31 +1063,33 @@ final class CodexAgentSession: ObservableObject, Identifiable, BrowserWorkspaceA
                     title = taskTitle
                 }
                 let visibleText = parsed.visibleText
-                upsertEntry(id: id, role: .assistant, text: visibleText)
-                OpenClickyMessageLogStore.shared.appendConversationTurn(
-                    lane: "agent",
-                    direction: "outgoing",
-                    role: "assistant",
-                    text: visibleText,
-                    source: "codex_agent_session",
-                    sessionID: self.id.uuidString,
-                    title: title,
-                    extraFields: [
-                        "model": model,
-                        "workingDirectory": workingDirectoryPath,
-                        "itemID": id,
-                        "taskTitleMetadata": parsed.taskTitle ?? ""
-                    ]
-                )
-                latestResponseCard = ClickyResponseCard(
-                    source: .agent,
-                    rawText: Self.userFacingAgentMessage(from: visibleText),
-                    contextTitle: lastSubmittedPrompt
-                )
-                if let fileURL = Self.firstOpenableFileURL(in: visibleText) {
-                    onOpenableFileFound?(fileURL)
+                if !visibleText.isEmpty {
+                    upsertEntry(id: id, role: .assistant, text: visibleText)
+                    OpenClickyMessageLogStore.shared.appendConversationTurn(
+                        lane: "agent",
+                        direction: "outgoing",
+                        role: "assistant",
+                        text: visibleText,
+                        source: "codex_agent_session",
+                        sessionID: self.id.uuidString,
+                        title: title,
+                        extraFields: [
+                            "model": model,
+                            "workingDirectory": workingDirectoryPath,
+                            "itemID": id,
+                            "taskTitleMetadata": parsed.taskTitle ?? ""
+                        ]
+                    )
+                    latestResponseCard = ClickyResponseCard(
+                        source: .agent,
+                        rawText: Self.userFacingAgentMessage(from: visibleText),
+                        contextTitle: lastSubmittedPrompt
+                    )
+                    if let fileURL = Self.firstOpenableFileURL(in: visibleText) {
+                        onOpenableFileFound?(fileURL)
+                    }
+                    persistCompletedTurnMemory(agentResponse: visibleText)
                 }
-                persistCompletedTurnMemory(agentResponse: visibleText)
             }
             currentAssistantEntryID = nil
         case "plan":
@@ -1732,11 +1734,12 @@ final class CodexAgentSession: ObservableObject, Identifiable, BrowserWorkspaceA
 
 
     private static func userFacingAgentMessage(from text: String) -> String {
-        if let fileURL = firstOpenableFileURL(in: text) {
+        let visibleText = strippingAgentResponseMetadata(from: text)
+        if let fileURL = firstOpenableFileURL(in: visibleText) {
             return "Found \(genericArtifactLabel(for: fileURL)). Showing it now."
         }
 
-        return text
+        return visibleText
     }
 
     private static func genericArtifactLabel(for fileURL: URL) -> String {
@@ -2237,10 +2240,24 @@ final class CodexAgentSession: ObservableObject, Identifiable, BrowserWorkspaceA
             visibleLines.append(line)
         }
 
-        let visibleText = visibleLines
-            .joined(separator: "\n")
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        return (visibleText.isEmpty ? text : visibleText, extractedTitle)
+        let visibleText = strippingAgentResponseMetadata(from: visibleLines.joined(separator: "\n"))
+        let fallbackText = strippingAgentResponseMetadata(from: text)
+        return (visibleText.isEmpty ? fallbackText : visibleText, extractedTitle)
+    }
+
+    private static func strippingAgentResponseMetadata(from text: String) -> String {
+        var visibleText = text
+        visibleText = visibleText.replacingOccurrences(
+            of: #"(?is)<\s*NEXT_ACTIONS\s*>.*?<\s*/\s*NEXT_ACTIONS\s*>"#,
+            with: " ",
+            options: .regularExpression
+        )
+        visibleText = visibleText.replacingOccurrences(
+            of: #"(?im)^\s*TASK[_\s-]*TITLE\s*:\s*.*$"#,
+            with: " ",
+            options: .regularExpression
+        )
+        return visibleText.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private static func taskTitleMetadataValue(from line: String) -> String? {
@@ -2286,7 +2303,7 @@ final class CodexAgentSession: ObservableObject, Identifiable, BrowserWorkspaceA
             return nil
         }
 
-        let text = latestEntry.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let text = strippingAgentResponseMetadata(from: latestEntry.text)
         return text.isEmpty ? nil : text
     }
 
@@ -2359,7 +2376,7 @@ final class CodexAgentSession: ObservableObject, Identifiable, BrowserWorkspaceA
     }
 
     private static func spokenSnippet(from text: String, maxLength: Int) -> String {
-        let flattened = text
+        let flattened = strippingAgentResponseMetadata(from: text)
             .components(separatedBy: .whitespacesAndNewlines)
             .filter { !$0.isEmpty }
             .joined(separator: " ")
@@ -2377,7 +2394,7 @@ final class CodexAgentSession: ObservableObject, Identifiable, BrowserWorkspaceA
     }
 
     private static func displaySnippet(from text: String, maxLength: Int) -> String {
-        let flattened = text
+        let flattened = strippingAgentResponseMetadata(from: text)
             .components(separatedBy: .whitespacesAndNewlines)
             .filter { !$0.isEmpty }
             .joined(separator: " ")
@@ -2401,4 +2418,3 @@ extension CodexAgentSession {
     }
 }
 #endif
-

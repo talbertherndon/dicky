@@ -3077,6 +3077,17 @@ private struct OpenClickyBrowserPageMetadata {
     let canGoForward: Bool
 }
 
+private enum OpenClickyBrowserUserAgent {
+    // Some sites down-level embedded WebKit views when they see an app-specific
+    // user agent. Present the Browser Workspace as a normal desktop Safari
+    // session so it receives the full desktop experience.
+    static let desktopSafari = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/605.1.15"
+
+    static func apply(to webView: WKWebView) {
+        webView.customUserAgent = desktopSafari
+    }
+}
+
 private struct OpenClickyWorkspaceWebView: NSViewRepresentable {
     let loadRequest: OpenClickyBrowserLoadRequest
     let onWebViewReady: (WKWebView) -> Void
@@ -3092,6 +3103,7 @@ private struct OpenClickyWorkspaceWebView: NSViewRepresentable {
         configuration.defaultWebpagePreferences.allowsContentJavaScript = true
         configuration.userContentController.add(context.coordinator, name: "openClickyInspector")
         let webView = WKWebView(frame: .zero, configuration: configuration)
+        OpenClickyBrowserUserAgent.apply(to: webView)
         webView.navigationDelegate = context.coordinator
         webView.allowsBackForwardNavigationGestures = true
         webView.setValue(false, forKey: "drawsBackground")

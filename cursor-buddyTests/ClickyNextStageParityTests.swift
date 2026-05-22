@@ -59,6 +59,7 @@ struct ClickyNextStageParityTests {
             - Open the memory window
             - Ask one more question
             </NEXT_ACTIONS>
+            TASK_TITLE: Response Metadata Cleanup
             """,
             contextTitle: "SpaceX competitor research and launch notes",
             createdAt: Date(timeIntervalSince1970: 42)
@@ -68,6 +69,17 @@ struct ClickyNextStageParityTests {
         #expect(card.displayText.count <= ClickyResponseCard.maximumDisplayCharacters)
         #expect(card.suggestedNextActions == ["Open the memory window", "Ask one more question"])
         #expect(card.displayTitle == "SPACEX COMPETITOR RESEARCH…")
+    }
+
+    @Test func responseCardsHideInlineAgentMetadataInPanels() throws {
+        let card = ClickyResponseCard(
+            source: .agent,
+            rawText: "Fixed the panel render. <NEXT_ACTIONS> - Test panel card - Review Swift diff </NEXT_ACTIONS>\nTASK_TITLE: Panel Metadata Render",
+            contextTitle: "panels render properly"
+        )
+
+        #expect(card.displayText == "Fixed the panel render.")
+        #expect(card.suggestedNextActions == ["Test panel card", "Review Swift diff"])
     }
 
     @Test func handoffSelectionBuildsRegionPayloadMetadata() throws {

@@ -52,6 +52,8 @@ The page canvas is the main WebView area. It must support:
 
 The page should remain fully interactive. The chat panel must not steal focus unless the user clicks or invokes the composer.
 
+The embedded WebKit page should identify as a normal desktop Safari browser so sites serve their full desktop experience instead of down-leveling OpenClicky's in-app browser shell.
+
 ### Right OpenClicky chat panel
 
 The side panel is not a generic browser sidebar. It is OpenClicky's own chat interface component rendered inside the browser workspace.

@@ -840,9 +840,7 @@ final class AgentMenuBarStatusManager: NSObject {
 
     private func dismissMenuBarAgent(_ item: ClickyAgentDockItem, companionManager: CompanionManager?) {
         guard let companionManager else { return }
-        if companionManager.agentDockItems.contains(where: { $0.id == item.id }) {
-            companionManager.dismissAgentDockItem(item.id)
-        }
+        companionManager.dismissAgentDockItem(item.id)
     }
 
     private func installDropTarget(on button: NSStatusBarButton, itemID: UUID) {

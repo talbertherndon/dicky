@@ -169,7 +169,7 @@ final class OpenClickyNotchCaptureWindowManager {
     private static let collapsedPanelHeight: CGFloat = statusLozengeHeight
     private static let expandedHandleWidth: CGFloat = 96
     private static let expandedHandleHeight: CGFloat = 10
-    private static let textPanelHeight: CGFloat = 226
+    private static let textPanelHeight: CGFloat = 112
     private static let mainPanelMaximumHeight: CGFloat = 720
     private static let voicePanelHeight: CGFloat = statusLozengeHeight
     private static let topGap: CGFloat = 0
@@ -1574,6 +1574,8 @@ private final class OpenClickyNotchCaptureRootView: NSView, NSTextFieldDelegate 
     private let subtitleLabel = NSTextField(labelWithString: "Menu-bar notch surface, existing fast voice stack, local agent handoff.")
     private let inputShell = OpenClickyRoundedView(cornerRadius: 21)
     private let textField = NSTextField()
+    private let attachmentStack = NSStackView()
+    private let dropOverlayLabel = NSTextField(labelWithString: "Drop to attach")
     private let suggestionStack = NSStackView()
     private let actionStack = NSStackView()
     private let voiceTitleLabel = NSTextField(labelWithString: "Listening")
@@ -1597,18 +1599,40 @@ private final class OpenClickyNotchCaptureRootView: NSView, NSTextFieldDelegate 
     private var dismiss: (() -> Void)?
     private var expand: (() -> Void)?
     private var accentColor = NSColor(calibratedRed: 0.20, green: 0.50, blue: 1.00, alpha: 1.0)
+    private var droppedAttachments: [NotchDraftAttachment] = []
+    private var isDropTargeted = false
+
+    private struct NotchDraftAttachment: Equatable {
+        enum Kind {
+            case image
+            case document
+        }
+
+        let url: URL
+        let kind: Kind
+
+        var chipTitle: String {
+            url.lastPathComponent.isEmpty ? url.path : url.lastPathComponent
+        }
+
+        var systemImage: String {
+            kind == .image ? "photo" : "doc"
+        }
+    }
 
     private static let collapsedLabelMaxWidth: CGFloat = 300
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         buildViewHierarchy()
+        registerForDraggedTypes([.fileURL, .URL, .png, .tiff])
         configureText(accentColor: accentColor, submitText: { _ in }, dismiss: {})
     }
 
     required init?(coder: NSCoder) {
         super.init(coder: coder)
         buildViewHierarchy()
+        registerForDraggedTypes([.fileURL, .URL, .png, .tiff])
         configureText(accentColor: accentColor, submitText: { _ in }, dismiss: {})
     }
 
@@ -1685,8 +1709,11 @@ private final class OpenClickyNotchCaptureRootView: NSView, NSTextFieldDelegate 
         shellView.roundedShadowBlurRadius = 16
         shellView.roundedShadowOffset = NSSize(width: 0, height: -8)
         updateAccentColors()
+        droppedAttachments.removeAll()
+        updateAttachments()
         updateSuggestions()
         textField.stringValue = ""
+        setDropTargeted(false)
         updateShellConstraints(animated: true)
         window?.makeFirstResponder(textField)
     }
@@ -2058,16 +2085,24 @@ private final class OpenClickyNotchCaptureRootView: NSView, NSTextFieldDelegate 
         copyStack.spacing = 2
         titleLabel.font = .systemFont(ofSize: 17, weight: .heavy)
         titleLabel.textColor = NSColor.white.withAlphaComponent(0.96)
+        subtitleLabel.stringValue = "Type a task, drop files, then send."
         subtitleLabel.font = .systemFont(ofSize: 11, weight: .semibold)
         subtitleLabel.textColor = NSColor.white.withAlphaComponent(0.64)
         subtitleLabel.maximumNumberOfLines = 2
         copyStack.addArrangedSubview(titleLabel)
         copyStack.addArrangedSubview(subtitleLabel)
         header.addArrangedSubview(copyStack)
-        textStack.addArrangedSubview(header)
 
         configureInputRow()
         textStack.addArrangedSubview(inputShell)
+
+        attachmentStack.orientation = .horizontal
+        attachmentStack.alignment = .centerY
+        attachmentStack.spacing = 6
+        attachmentStack.translatesAutoresizingMaskIntoConstraints = false
+        attachmentStack.isHidden = true
+        textStack.addArrangedSubview(attachmentStack)
+        attachmentStack.heightAnchor.constraint(equalToConstant: 24).isActive = true
 
         suggestionStack.orientation = .horizontal
         suggestionStack.alignment = .centerY
@@ -2084,6 +2119,7 @@ private final class OpenClickyNotchCaptureRootView: NSView, NSTextFieldDelegate 
         for action in OpenClickyNotchCaptureAction.allCases {
             actionStack.addArrangedSubview(makeActionButton(action))
         }
+        actionStack.isHidden = true
         textStack.addArrangedSubview(actionStack)
         actionStack.heightAnchor.constraint(equalToConstant: 40).isActive = true
 
@@ -2107,6 +2143,11 @@ private final class OpenClickyNotchCaptureRootView: NSView, NSTextFieldDelegate 
         row.spacing = 8
         row.translatesAutoresizingMaskIntoConstraints = false
         inputShell.addSubview(row)
+        dropOverlayLabel.translatesAutoresizingMaskIntoConstraints = false
+        dropOverlayLabel.font = .systemFont(ofSize: 12, weight: .heavy)
+        dropOverlayLabel.textColor = NSColor.white.withAlphaComponent(0.92)
+        dropOverlayLabel.isHidden = true
+        inputShell.addSubview(dropOverlayLabel)
 
         let bubbleIcon = makeSmallIcon(systemName: "text.bubble.fill")
         row.addArrangedSubview(bubbleIcon)
@@ -2117,11 +2158,12 @@ private final class OpenClickyNotchCaptureRootView: NSView, NSTextFieldDelegate 
         textField.focusRingType = .none
         textField.font = .systemFont(ofSize: 13, weight: .semibold)
         textField.textColor = NSColor.white.withAlphaComponent(0.95)
-        textField.placeholderString = "Ask OpenClicky…"
+        textField.placeholderString = "Ask Clicky…"
         textField.delegate = self
         row.addArrangedSubview(textField)
 
-        row.addArrangedSubview(makeGlyphButton(systemName: "arrow.up.circle.fill", tooltip: "Send OpenClicky prompt", action: { [weak self] in self?.submit(.ask) }))
+        row.addArrangedSubview(makeGlyphButton(systemName: "paperclip", tooltip: "Drop files anywhere on this OpenClicky input", action: { }))
+        row.addArrangedSubview(makeGlyphButton(systemName: "arrow.up.circle.fill", tooltip: "Send OpenClicky task", action: { [weak self] in self?.submit(.ask) }))
         row.addArrangedSubview(makeGlyphButton(systemName: "xmark.circle.fill", tooltip: "Close OpenClicky capture", action: { [weak self] in self?.dismiss?() }))
 
         NSLayoutConstraint.activate([
@@ -2129,6 +2171,8 @@ private final class OpenClickyNotchCaptureRootView: NSView, NSTextFieldDelegate 
             row.leadingAnchor.constraint(equalTo: inputShell.leadingAnchor, constant: 14),
             row.trailingAnchor.constraint(equalTo: inputShell.trailingAnchor, constant: -12),
             row.centerYAnchor.constraint(equalTo: inputShell.centerYAnchor),
+            dropOverlayLabel.centerXAnchor.constraint(equalTo: inputShell.centerXAnchor),
+            dropOverlayLabel.centerYAnchor.constraint(equalTo: inputShell.centerYAnchor),
             bubbleIcon.widthAnchor.constraint(equalToConstant: 24),
             bubbleIcon.heightAnchor.constraint(equalToConstant: 24)
         ])
@@ -2313,6 +2357,54 @@ private final class OpenClickyNotchCaptureRootView: NSView, NSTextFieldDelegate 
         voicePhaseIconView.contentTintColor = accentColor
     }
 
+    private func updateAttachments() {
+        attachmentStack.arrangedSubviews.forEach { view in
+            attachmentStack.removeArrangedSubview(view)
+            view.removeFromSuperview()
+        }
+        attachmentStack.isHidden = droppedAttachments.isEmpty
+        guard !droppedAttachments.isEmpty else { return }
+
+        for attachment in droppedAttachments.prefix(4) {
+            attachmentStack.addArrangedSubview(makeAttachmentChip(attachment))
+        }
+        if droppedAttachments.count > 4 {
+            let moreLabel = NSTextField(labelWithString: "+\(droppedAttachments.count - 4) more")
+            moreLabel.font = .systemFont(ofSize: 10, weight: .heavy)
+            moreLabel.textColor = NSColor.white.withAlphaComponent(0.62)
+            attachmentStack.addArrangedSubview(moreLabel)
+        }
+    }
+
+    private func makeAttachmentChip(_ attachment: NotchDraftAttachment) -> NSView {
+        let chip = OpenClickyClosureButton(systemName: attachment.systemImage, title: attachment.chipTitle, action: { [weak self] in
+            self?.droppedAttachments.removeAll { $0.url.standardizedFileURL == attachment.url.standardizedFileURL }
+            self?.updateAttachments()
+        })
+        chip.symbolPointSize = 9
+        chip.font = .systemFont(ofSize: 10, weight: .heavy)
+        chip.contentTintColor = NSColor.white.withAlphaComponent(0.88)
+        chip.cornerRadius = 10
+        chip.fillColor = NSColor.white.withAlphaComponent(0.13)
+        chip.borderColor = NSColor.white.withAlphaComponent(0.10)
+        chip.toolTip = "Remove \(attachment.chipTitle)"
+        return chip
+    }
+
+    private func promptWithAttachments(_ prompt: String) -> String {
+        guard !droppedAttachments.isEmpty else { return prompt }
+        let request = prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Please review the attached file(s)." : prompt
+        let attachmentLines = droppedAttachments.enumerated().map { index, attachment in
+            "\(index + 1). \(attachment.kind == .image ? "Image" : "Document"): \(attachment.url.path)"
+        }.joined(separator: "\n")
+        return """
+        \(request)
+
+        OpenClicky notch input attachments:
+        \(attachmentLines)
+        """.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
     private func updateSuggestions() {
         suggestionStack.arrangedSubviews.forEach { view in
             suggestionStack.removeArrangedSubview(view)
@@ -2320,12 +2412,10 @@ private final class OpenClickyNotchCaptureRootView: NSView, NSTextFieldDelegate 
         }
 
         guard let trigger = currentTrigger() else {
-            let label = NSTextField(labelWithString: "Type / or @ for context")
-            label.font = .systemFont(ofSize: 9, weight: .semibold)
-            label.textColor = NSColor.white.withAlphaComponent(0.44)
-            suggestionStack.addArrangedSubview(label)
+            suggestionStack.isHidden = true
             return
         }
+        suggestionStack.isHidden = false
 
         let candidates = OpenClickyNotchCaptureSuggestion.candidates(for: trigger.kind)
         let filtered = trigger.query.isEmpty
@@ -2344,6 +2434,8 @@ private final class OpenClickyNotchCaptureRootView: NSView, NSTextFieldDelegate 
         guard !submitted.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
         submitText?(submitted)
         textField.stringValue = ""
+        droppedAttachments.removeAll()
+        updateAttachments()
         updateSuggestions()
         dismiss?()
     }
@@ -2353,10 +2445,11 @@ private final class OpenClickyNotchCaptureRootView: NSView, NSTextFieldDelegate 
         let stripped = Self.strippingLeadingAgentToken(from: trimmed)
         if action == .agent || stripped.didStrip {
             let request = stripped.text.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !request.isEmpty else { return "" }
-            return "ask an agent to \(request)"
+            let routedRequest = request.isEmpty && !droppedAttachments.isEmpty ? "Please review the attached file(s)." : request
+            guard !routedRequest.isEmpty else { return "" }
+            return promptWithAttachments("ask an agent to \(routedRequest)")
         }
-        return trimmed
+        return promptWithAttachments(trimmed)
     }
 
     private static func strippingLeadingAgentToken(from rawText: String) -> (text: String, didStrip: Bool) {
@@ -2394,6 +2487,95 @@ private final class OpenClickyNotchCaptureRootView: NSView, NSTextFieldDelegate 
             return nil
         }
         return (kind, String(token.dropFirst()), tokenRange)
+    }
+
+    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
+        guard mode == .text, pasteboardHasSupportedDrop(sender.draggingPasteboard) else { return [] }
+        setDropTargeted(true)
+        return .copy
+    }
+
+    override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation {
+        guard mode == .text, pasteboardHasSupportedDrop(sender.draggingPasteboard) else { return [] }
+        return .copy
+    }
+
+    override func draggingExited(_ sender: NSDraggingInfo?) {
+        setDropTargeted(false)
+    }
+
+    override func draggingEnded(_ sender: NSDraggingInfo) {
+        setDropTargeted(false)
+    }
+
+    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        defer { setDropTargeted(false) }
+        guard mode == .text else { return false }
+        return addAttachments(from: sender.draggingPasteboard)
+    }
+
+    private func pasteboardHasSupportedDrop(_ pasteboard: NSPasteboard) -> Bool {
+        pasteboard.canReadObject(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true])
+            || pasteboard.data(forType: .png) != nil
+            || pasteboard.data(forType: .tiff) != nil
+    }
+
+    private func addAttachments(from pasteboard: NSPasteboard) -> Bool {
+        var accepted = false
+        if let urls = pasteboard.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL] {
+            for url in urls where url.isFileURL {
+                addAttachment(url.standardizedFileURL)
+                accepted = true
+            }
+        }
+        if let pngData = pasteboard.data(forType: .png), let url = Self.persistDroppedImage(pngData, extension: "png") {
+            addAttachment(url, forcedKind: .image)
+            accepted = true
+        } else if let tiffData = pasteboard.data(forType: .tiff),
+                  let bitmap = NSBitmapImageRep(data: tiffData),
+                  let pngData = bitmap.representation(using: .png, properties: [:]),
+                  let url = Self.persistDroppedImage(pngData, extension: "png") {
+            addAttachment(url, forcedKind: .image)
+            accepted = true
+        }
+        if accepted {
+            updateAttachments()
+            window?.makeFirstResponder(textField)
+        }
+        return accepted
+    }
+
+    private func addAttachment(_ url: URL, forcedKind: NotchDraftAttachment.Kind? = nil) {
+        let standardizedURL = url.standardizedFileURL
+        guard droppedAttachments.contains(where: { $0.url.standardizedFileURL == standardizedURL }) == false else { return }
+        droppedAttachments.append(NotchDraftAttachment(url: standardizedURL, kind: forcedKind ?? Self.attachmentKind(for: standardizedURL)))
+    }
+
+    private func setDropTargeted(_ targeted: Bool) {
+        isDropTargeted = targeted
+        inputShell.borderColor = targeted ? accentColor.withAlphaComponent(0.78) : NSColor.white.withAlphaComponent(0.10)
+        inputShell.fillColor = targeted ? accentColor.withAlphaComponent(0.16) : NSColor.black.withAlphaComponent(0.22)
+        dropOverlayLabel.isHidden = !targeted
+        inputShell.needsDisplay = true
+    }
+
+    private static func attachmentKind(for url: URL) -> NotchDraftAttachment.Kind {
+        let imageExtensions: Set<String> = ["png", "jpg", "jpeg", "gif", "heic", "webp", "tiff", "bmp"]
+        return imageExtensions.contains(url.pathExtension.lowercased()) ? .image : .document
+    }
+
+    private static func persistDroppedImage(_ data: Data, extension pathExtension: String) -> URL? {
+        let directory = FileManager.default
+            .homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Application Support/OpenClicky/AgentMode/DroppedAttachments", isDirectory: true)
+        do {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            let url = directory.appendingPathComponent("notch-input-drop-\(UUID().uuidString).\(pathExtension)")
+            try data.write(to: url, options: .atomic)
+            return url
+        } catch {
+            return nil
+        }
     }
 
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }

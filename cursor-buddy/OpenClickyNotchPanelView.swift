@@ -580,7 +580,12 @@ struct OpenClickyNotchPanelView: View {
             return 560
         case .agents:
             if expandedAgentSessionID != nil {
-                return hasExpandedAgentChatExpansionRoom ? 760 : 700
+                // Expanding an agent chat should reveal the session inside the
+                // existing main panel whenever possible. Keep the panel at the
+                // normal Agents-tab height and let the nested session scroller
+                // absorb long transcripts instead of forcing the whole panel
+                // taller on compact/short panel layouts.
+                return agentPanelSelection == .specialists ? 430 : 500
             }
             return agentPanelSelection == .specialists ? 430 : 500
         case .connections:
@@ -2198,11 +2203,11 @@ struct OpenClickyNotchPanelView: View {
     }
 
     private var expandedAgentConversationMinHeight: CGFloat {
-        hasExpandedAgentChatExpansionRoom ? 340 : 170
+        hasExpandedAgentChatExpansionRoom ? 220 : 150
     }
 
     private var expandedAgentConversationMaxHeight: CGFloat {
-        hasExpandedAgentChatExpansionRoom ? 420 : 220
+        hasExpandedAgentChatExpansionRoom ? 320 : 220
     }
 
     private func agentReplyField(for session: CodexAgentSession) -> some View {

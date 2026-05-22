@@ -177,7 +177,8 @@ struct ClickyResponseCard: Identifiable, Equatable {
 
     static func sanitizedDisplayText(from rawText: String, maximumCharacters: Int = maximumDisplayCharacters) -> String {
         var text = rawText
-        text = text.replacingOccurrences(of: #"(?s)<NEXT_ACTIONS>.*?</NEXT_ACTIONS>"#, with: " ", options: .regularExpression)
+        text = text.replacingOccurrences(of: #"(?is)<\s*NEXT_ACTIONS\s*>.*?<\s*/\s*NEXT_ACTIONS\s*>"#, with: " ", options: .regularExpression)
+        text = text.replacingOccurrences(of: #"(?im)^\s*TASK[_\s-]*TITLE\s*:\s*.*$"#, with: " ", options: .regularExpression)
         text = text.replacingOccurrences(of: #"(?s)```.*?```"#, with: " ", options: .regularExpression)
         text = text.replacingOccurrences(of: #"\[POINT:[^\]]+\]"#, with: " ", options: .regularExpression)
         text = text.replacingOccurrences(of: #"(?m)^\s{0,3}#{1,6}\s+.*$"#, with: " ", options: .regularExpression)
@@ -206,22 +207,31 @@ struct ClickyResponseCard: Identifiable, Equatable {
     static func suggestedNextActions(from rawText: String) -> [String] {
         guard
             let blockRange = rawText.range(
-                of: #"(?s)<NEXT_ACTIONS>\s*(.*?)\s*</NEXT_ACTIONS>"#,
+                of: #"(?is)<\s*NEXT_ACTIONS\s*>\s*(.*?)\s*<\s*/\s*NEXT_ACTIONS\s*>"#,
                 options: .regularExpression
             )
         else {
             return []
         }
 
-        let blockText = String(rawText[blockRange])
-        let actionTitles = blockText
-            .components(separatedBy: .newlines)
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .compactMap { line -> String? in
-                guard line.hasPrefix("- ") else { return nil }
-                let actionTitle = String(line.dropFirst(2)).trimmingCharacters(in: .whitespacesAndNewlines)
+        var blockText = String(rawText[blockRange])
+        blockText = blockText.replacingOccurrences(
+            of: #"(?is)<\s*/?\s*NEXT_ACTIONS\s*>"#,
+            with: " ",
+            options: .regularExpression
+        )
+
+        let actionTitles: [String]
+        if let regex = try? NSRegularExpression(pattern: #"(?s)(?:^|\s)-\s+(.+?)(?=\s+-\s+|$)"#) {
+            let range = NSRange(blockText.startIndex..<blockText.endIndex, in: blockText)
+            actionTitles = regex.matches(in: blockText, range: range).compactMap { match in
+                guard let titleRange = Range(match.range(at: 1), in: blockText) else { return nil }
+                let actionTitle = String(blockText[titleRange]).trimmingCharacters(in: .whitespacesAndNewlines)
                 return actionTitle.isEmpty ? nil : actionTitle
             }
+        } else {
+            actionTitles = []
+        }
 
         let maximumActionCount = min(2, actionTitles.count)
         return Array(actionTitles[0..<maximumActionCount])

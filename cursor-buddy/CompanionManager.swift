@@ -5388,11 +5388,9 @@ final class CompanionManager: ObservableObject {
     }
 
     private func showMainOpenClickyPanelFromShortcut() {
-        guard allPermissionsGranted else { return }
-        guard !buddyDictationManager.isKeyboardShortcutSessionActiveOrFinalizing else { return }
-
-        textModeWindowManager.hide()
-        notchCaptureWindowManager.showMainInterfacePanel(companionManager: self)
+        showNotchTextInput { [weak self] submittedText in
+            self?.submitNewAgentTaskFromUI(submittedText, source: "notch_shortcut_task_prompt")
+        }
     }
 
     private func showTextModeInputAtCursor(activationPoint: CGPoint? = nil) {
@@ -10367,12 +10365,18 @@ final class CompanionManager: ObservableObject {
     }
 
     func dismissAgentDockItem(_ itemID: UUID) {
-        // Dismiss is a visual close/removal only. It must not cancel the
-        // underlying Codex task; explicit Stop handles that after confirm.
-        if let sessionID = agentDockItems.first(where: { $0.id == itemID })?.sessionID {
+        // The dock/menu "Archive" affordance should archive the underlying
+        // task, not just hide its visual parked/menu item. Menu-bar task
+        // items may be synthesized directly from Codex sessions, so their
+        // item ID is the session ID and there may be no matching dock item.
+        if let sessionID = agentDockItems.first(where: { $0.id == itemID })?.sessionID
+            ?? codexAgentSessions.first(where: { $0.id == itemID })?.id {
             cancelPendingAgentDockItemRemoval(for: sessionID)
-            silenceAgentSpeech(for: sessionID, reason: "agent_dock_item_archived")
+            archiveSession(sessionID, allowIncomplete: true)
+            return
         }
+
+        // Unsessioned completed cues are visual-only; remove those directly.
         agentDockItems.removeAll { $0.id == itemID }
         if agentDockItems.isEmpty {
             agentDockWindowManager.hide()
@@ -14356,4 +14360,3 @@ extension CompanionManager {
     }
 }
 #endif
-
