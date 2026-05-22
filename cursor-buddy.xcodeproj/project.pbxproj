@@ -14,6 +14,7 @@
 		24D85D692FBEE5D8004FEDAD /* OpenClickyUI in Frameworks */ = {isa = PBXBuildFile; productRef = 24D85D682FBEE5D8004FEDAD /* OpenClickyUI */; };
 		24E363952FB3400600B27AB1 /* GLTFSceneKit in Frameworks */ = {isa = PBXBuildFile; productRef = AA00BB042F6500040039DA55 /* GLTFSceneKit */; };
 		AA00BB032F6500030039DA55 /* Sparkle in Frameworks */ = {isa = PBXBuildFile; productRef = AA00BB022F6500020039DA55 /* Sparkle */; };
+		AA77D0032FBF00010039DA55 /* DynamicNotchKit in Frameworks */ = {isa = PBXBuildFile; productRef = AA77D0022FBF00010039DA55 /* DynamicNotchKit */; };
 		AA20BF010000000000000001 /* OpenClickyWidgetModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA20FR010000000000000001 /* OpenClickyWidgetModels.swift */; };
 		AA20BF020000000000000001 /* OpenClickyWidgetSnapshotReader.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA20FR020000000000000001 /* OpenClickyWidgetSnapshotReader.swift */; };
 		AA20BF030000000000000001 /* OpenClickyWidgets.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA20FR030000000000000001 /* OpenClickyWidgets.swift */; };
@@ -115,6 +116,7 @@
 				24D85D652FBEE5D8004FEDAD /* OpenClickyMarkdown in Frameworks */,
 				24D85D672FBEE5D8004FEDAD /* OpenClickyMemory in Frameworks */,
 				24E363952FB3400600B27AB1 /* GLTFSceneKit in Frameworks */,
+				AA77D0032FBF00010039DA55 /* DynamicNotchKit in Frameworks */,
 				AA00BB032F6500030039DA55 /* Sparkle in Frameworks */,
 				24D85D692FBEE5D8004FEDAD /* OpenClickyUI in Frameworks */,
 				24D85D612FBEE5D8004FEDAD /* OpenClickyBrowser in Frameworks */,
@@ -230,6 +232,7 @@
 				24D85D642FBEE5D8004FEDAD /* OpenClickyMarkdown */,
 				24D85D662FBEE5D8004FEDAD /* OpenClickyMemory */,
 				24D85D682FBEE5D8004FEDAD /* OpenClickyUI */,
+				AA77D0022FBF00010039DA55 /* DynamicNotchKit */,
 			);
 			productName = "cursor-buddy";
 			productReference = 28F22CBF2F56440300A0FC59 /* OpenClicky.app */;
@@ -339,6 +342,7 @@
 			packageReferences = (
 				AA00BB012F6500010039DA55 /* XCRemoteSwiftPackageReference "Sparkle" */,
 				AA00BB052F6500050039DA55 /* XCRemoteSwiftPackageReference "GLTFSceneKit" */,
+				AA77D0012FBF00010039DA55 /* XCRemoteSwiftPackageReference "DynamicNotchKit" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 28F22CC02F56440300A0FC59 /* Products */;
@@ -901,6 +905,14 @@
 				minimumVersion = 0.4.0;
 			};
 		};
+		AA77D0012FBF00010039DA55 /* XCRemoteSwiftPackageReference "DynamicNotchKit" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/MrKai77/DynamicNotchKit";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 1.1.0;
+			};
+		};
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
@@ -933,6 +945,11 @@
 			isa = XCSwiftPackageProductDependency;
 			package = AA00BB052F6500050039DA55 /* XCRemoteSwiftPackageReference "GLTFSceneKit" */;
 			productName = GLTFSceneKit;
+		};
+		AA77D0022FBF00010039DA55 /* DynamicNotchKit */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = AA77D0012FBF00010039DA55 /* XCRemoteSwiftPackageReference "DynamicNotchKit" */;
+			productName = DynamicNotchKit;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

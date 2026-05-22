@@ -34,11 +34,35 @@ struct cursor_buddyApp: App {
                 .keyboardShortcut(",", modifiers: .command)
             }
 
-            CommandMenu("OpenClicky") {
+            CommandMenu("Tools") {
                 Button("Browser Workspace…") {
                     appDelegate.showBrowserWorkspaceFromApplicationMenu()
                 }
                 .keyboardShortcut("b", modifiers: [.command, .option])
+
+                Divider()
+
+                Button("Memory Browser…") {
+                    appDelegate.showMemoryWindowFromApplicationMenu()
+                }
+
+                Button("Open Memory File") {
+                    appDelegate.openMemoryFileFromApplicationMenu()
+                }
+
+                Button("Open Skills Folder") {
+                    appDelegate.openSkillsFolderFromApplicationMenu()
+                }
+
+                Button("Log Viewer…") {
+                    appDelegate.showLogViewerFromApplicationMenu()
+                }
+
+                Divider()
+
+                Button("Settings…") {
+                    appDelegate.showSettingsWindowFromApplicationMenu()
+                }
             }
         }
     }
@@ -101,6 +125,22 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDel
 
     func showBrowserWorkspaceFromApplicationMenu() {
         OpenClickyBrowserWorkspaceWindowManager.shared.show(delegate: companionManager)
+    }
+
+    func showMemoryWindowFromApplicationMenu() {
+        companionManager.showMemoryWindow()
+    }
+
+    func openMemoryFileFromApplicationMenu() {
+        companionManager.openOpenClickyDocument(companionManager.codexHomeManager.persistentMemoryFile)
+    }
+
+    func openSkillsFolderFromApplicationMenu() {
+        NSWorkspace.shared.open(companionManager.codexHomeManager.learnedSkillsDirectory)
+    }
+
+    func showLogViewerFromApplicationMenu() {
+        companionManager.showLogViewerWindow()
     }
 
     /// Registers the app as a login item so it launches automatically on

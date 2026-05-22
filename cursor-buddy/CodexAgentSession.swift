@@ -335,6 +335,25 @@ final class CodexAgentSession: ObservableObject, Identifiable, BrowserWorkspaceA
         !entries.isEmpty || activeThreadID != nil || status != .stopped
     }
 
+    var hasFinishedAgentResponse: Bool {
+        entries.contains { entry in
+            entry.role == .assistant
+                && !entry.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }
+    }
+
+    var isFinishedForArchive: Bool {
+        if progressStage == .completed {
+            return true
+        }
+
+        guard status == .ready, !isTurnActiveForChatQueue else {
+            return false
+        }
+
+        return hasFinishedAgentResponse
+    }
+
     var canResumeAfterRelaunch: Bool {
         wasRestoredAfterRelaunch && lastSubmittedPrompt != nil && !isTurnActiveForChatQueue
     }
@@ -411,7 +430,7 @@ final class CodexAgentSession: ObservableObject, Identifiable, BrowserWorkspaceA
         latestResponseCard = nil
         queuedFollowUpPrompts.removeAll()
         activityStatusLines.removeAll()
-        progressStage = .idle
+        progressStage = hasFinishedAgentResponse ? .completed : .idle
         lastErrorMessage = nil
         stopReason = nil
         status = archivedEntries.isEmpty ? .stopped : .ready
@@ -425,7 +444,7 @@ final class CodexAgentSession: ObservableObject, Identifiable, BrowserWorkspaceA
         latestResponseCard = nil
         queuedFollowUpPrompts.removeAll()
         activityStatusLines = ["Restored after relaunch"]
-        progressStage = .idle
+        progressStage = (!canResume && hasFinishedAgentResponse) ? .completed : .idle
         lastErrorMessage = nil
         stopReason = "restored_after_relaunch"
         wasRestoredAfterRelaunch = canResume

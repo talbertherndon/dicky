@@ -2547,7 +2547,7 @@ final class CompanionManager: ObservableObject {
             )
             return
         }
-        guard allowIncomplete || session.progressStage == .completed else {
+        guard allowIncomplete || session.isFinishedForArchive else {
             OpenClickyMessageLogStore.shared.append(
                 lane: "agent",
                 direction: "incoming",

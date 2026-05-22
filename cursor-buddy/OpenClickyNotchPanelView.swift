@@ -256,7 +256,7 @@ struct OpenClickyNotchPanelView: View {
 
     private var completedUnarchivedAgentSessions: [CodexAgentSession] {
         companionManager.codexAgentSessions.filter { session in
-            session.progressStage == .completed && !companionManager.archivedSessionIDs.contains(session.id)
+            session.isFinishedForArchive && !companionManager.archivedSessionIDs.contains(session.id)
         }
     }
 
@@ -505,10 +505,14 @@ struct OpenClickyNotchPanelView: View {
         .padding(14)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(
-            OpenClickyBottomRoundedRectangle(cornerRadius: 28)
+            RoundedRectangle(cornerRadius: 28, style: .continuous)
                 .fill(
                     OpenClickyLiquidGlassBackdropView.isLiquidGlassAvailable ?
-                        AnyShapeStyle(Color.clear) :
+                        // Keep a real SwiftUI surface under the native glass.
+                        // NSGlassEffectView can momentarily flatten when the
+                        // panel loses key focus; a transparent host makes that
+                        // look like the panel sides are being clipped away.
+                        AnyShapeStyle(DS.Colors.surface1.opacity(0.22)) :
                         AnyShapeStyle(LinearGradient(
                             colors: [DS.Colors.surface1.opacity(0.98), (DS.Colors.isDarkMode ? Color.black : Color.white).opacity(0.96)],
                             startPoint: .topLeading,
@@ -516,8 +520,13 @@ struct OpenClickyNotchPanelView: View {
                         ))
                 )
         )
-        .clipShape(OpenClickyBottomRoundedRectangle(cornerRadius: 28))
-        .contentShape(OpenClickyBottomRoundedRectangle(cornerRadius: 28))
+        .clipShape(RoundedRectangle(cornerRadius: 28, style: .continuous))
+        .contentShape(RoundedRectangle(cornerRadius: 28, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 28, style: .continuous)
+                .stroke(DS.Colors.borderSubtle.opacity(0.55), lineWidth: 0.8)
+                .allowsHitTesting(false)
+        )
         .overlay {
             if isPanelDropTargeted && !isQuickPromptDropTargeted && !isExpandedAgentDropTargeted {
                 dropTargetOverlay
@@ -1260,7 +1269,7 @@ struct OpenClickyNotchPanelView: View {
             pendingStopAgentSessionID = session.id
             return
         }
-        guard session.progressStage == .completed else {
+        guard session.isFinishedForArchive else {
             pendingArchiveAgentSessionID = session.id
             return
         }
@@ -2867,7 +2876,7 @@ private enum OpenClickyAgentSessionFilter: String, CaseIterable, Identifiable {
                 return !isArchived && session.isTurnActiveForChatQueue
             }
         case .completed:
-            return !isArchived && session.progressStage == .completed
+            return !isArchived && session.isFinishedForArchive
         case .archived:
             return isArchived
         case .all:
