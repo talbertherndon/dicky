@@ -45,6 +45,23 @@ private final class OpenClickyDynamicNotchKitModel: ObservableObject {
     var openMainPanel: () -> Void = {}
     var openNotch: () -> Void = {}
     var closeNotch: () -> Void = {}
+
+    // Notch text-input surface (shift+shift "Ask Clicky" prompt). The input row
+    // lives inside the expanded notch view; these drive its draft state.
+    @Published var draftText: String = ""
+    @Published var draftAttachments: [URL] = []
+    @Published var isInputFocused = false
+    @Published var isNotchHovered = false
+    /// Bumped to ask the expanded input row to take keyboard focus.
+    @Published var inputFocusRequest = 0
+    var submitText: (String) -> Void = { _ in }
+
+    /// Collapse the notch only when the pointer has left it and the input is
+    /// not being typed into — keeps the notch open while the user types.
+    func closeNotchIfIdle() {
+        guard !isNotchHovered, !isInputFocused else { return }
+        closeNotch()
+    }
 }
 
 @MainActor
@@ -121,6 +138,29 @@ final class OpenClickyDynamicNotchKitBridge {
             } else {
                 await notch.compact(on: screen)
             }
+        }
+    }
+
+    /// Expands the notch and routes keyboard focus into the in-notch "Ask
+    /// Clicky" input. Used by the shift+shift shortcut.
+    func showTextInput(
+        on screen: NSScreen,
+        accentColor: NSColor,
+        foregroundAppIcon: NSImage?,
+        foregroundAppName: String,
+        submitText: @escaping (String) -> Void
+    ) {
+        model.accentColor = accentColor
+        model.foregroundAppIcon = foregroundAppIcon
+        model.foregroundAppName = foregroundAppName
+        model.submitText = submitText
+        Task {
+            await notch.expand(on: screen)
+            notch.windowController?.window?.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+            // Let SwiftUI lay out the expanded view before requesting focus.
+            try? await Task.sleep(nanoseconds: 120_000_000)
+            model.inputFocusRequest &+= 1
         }
     }
 
@@ -251,43 +291,49 @@ private struct OpenClickyDynamicNotchKitExpandedView: View {
     @ObservedObject var model: OpenClickyDynamicNotchKitModel
 
     var body: some View {
-        HStack(spacing: 12) {
-            expandedAppIcon
+        VStack(spacing: 9) {
+            HStack(spacing: 12) {
+                expandedAppIcon
 
-            VStack(alignment: .leading, spacing: 2) {
-                Text(expandedTitle)
-                    .font(.system(size: 14, weight: .heavy))
-                    .foregroundStyle(.white.opacity(0.98))
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-                Text(expandedSubtitle)
-                    .font(.system(size: 10, weight: .semibold))
-                    .foregroundStyle(.white.opacity(0.58))
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-            }
-            .frame(width: 170, alignment: .leading)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(expandedTitle)
+                        .font(.system(size: 14, weight: .heavy))
+                        .foregroundStyle(.white.opacity(0.98))
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                    Text(expandedSubtitle)
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(.white.opacity(0.58))
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                }
+                .frame(width: 170, alignment: .leading)
 
-            HStack(spacing: 6) {
-                OpenClickyDynamicNotchKitChip(title: "Agent", systemImage: "shippingbox", accentColor: Color(nsColor: model.accentColor)) {
-                    model.openMainPanel()
-                }
-                OpenClickyDynamicNotchKitChip(title: "Screen", systemImage: "rectangle.dashed", accentColor: Color(nsColor: model.accentColor)) {
-                    model.openMainPanel()
-                }
-                OpenClickyDynamicNotchKitChip(title: "Open", systemImage: "arrow.up.right", accentColor: Color(nsColor: model.accentColor)) {
-                    model.openMainPanel()
+                HStack(spacing: 6) {
+                    OpenClickyDynamicNotchKitChip(title: "Agent", systemImage: "shippingbox", accentColor: Color(nsColor: model.accentColor)) {
+                        model.openMainPanel()
+                    }
+                    OpenClickyDynamicNotchKitChip(title: "Screen", systemImage: "rectangle.dashed", accentColor: Color(nsColor: model.accentColor)) {
+                        model.openMainPanel()
+                    }
+                    OpenClickyDynamicNotchKitChip(title: "Open", systemImage: "arrow.up.right", accentColor: Color(nsColor: model.accentColor)) {
+                        model.openMainPanel()
+                    }
                 }
             }
+            .frame(height: 46, alignment: .center)
+
+            OpenClickyDynamicNotchKitInputRow(model: model)
         }
-        .frame(height: 46, alignment: .center)
-        .padding(.vertical, 2)
-        .clipped()
+        .padding(.horizontal, 16)
+        .padding(.top, 4)
+        .padding(.bottom, 12)
         .onHover { isHovering in
+            model.isNotchHovered = isHovering
             if isHovering {
                 model.openNotch()
             } else {
-                model.closeNotch()
+                model.closeNotchIfIdle()
             }
         }
     }
@@ -334,6 +380,141 @@ private struct OpenClickyDynamicNotchKitExpandedView: View {
             return "Choose a control or open the panel"
         }
         return "Focused in \(name)"
+    }
+}
+
+/// The "Ask Clicky" prompt input embedded in the expanded notch. Carries a
+/// text field, drafted file attachments, and a send action. Submitting routes
+/// the composed prompt through `model.submitText`.
+private struct OpenClickyDynamicNotchKitInputRow: View {
+    @ObservedObject var model: OpenClickyDynamicNotchKitModel
+    @FocusState private var fieldFocused: Bool
+
+    private static let imageExtensions: Set<String> = [
+        "png", "jpg", "jpeg", "gif", "heic", "webp", "tiff", "bmp"
+    ]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            if !model.draftAttachments.isEmpty {
+                attachmentChips
+            }
+
+            HStack(spacing: 8) {
+                Image(systemName: "text.bubble.fill")
+                    .font(.system(size: 11, weight: .heavy))
+                    .foregroundStyle(Color(nsColor: model.accentColor))
+
+                TextField("Ask Clicky…", text: $model.draftText)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.95))
+                    .focused($fieldFocused)
+                    .onSubmit(submit)
+
+                Button(action: pickAttachments) {
+                    Image(systemName: "paperclip")
+                        .font(.system(size: 13, weight: .bold))
+                        .foregroundStyle(.white.opacity(0.66))
+                }
+                .buttonStyle(.plain)
+                .help("Attach files")
+
+                Button(action: submit) {
+                    Image(systemName: "arrow.up.circle.fill")
+                        .font(.system(size: 17, weight: .bold))
+                        .foregroundStyle(Color(nsColor: model.accentColor))
+                }
+                .buttonStyle(.plain)
+                .help("Send to OpenClicky")
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .background(.black.opacity(0.28), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .strokeBorder(.white.opacity(0.10), lineWidth: 1)
+            )
+        }
+        .onChange(of: model.inputFocusRequest) { _, _ in
+            fieldFocused = true
+        }
+        .onChange(of: fieldFocused) { _, focused in
+            model.isInputFocused = focused
+            if !focused {
+                model.closeNotchIfIdle()
+            }
+        }
+        .onExitCommand {
+            fieldFocused = false
+            model.closeNotch()
+        }
+    }
+
+    private var attachmentChips: some View {
+        HStack(spacing: 6) {
+            ForEach(model.draftAttachments, id: \.self) { url in
+                Button {
+                    model.draftAttachments.removeAll { $0 == url }
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: Self.isImage(url) ? "photo" : "doc")
+                        Text(url.lastPathComponent)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                        Image(systemName: "xmark")
+                    }
+                    .font(.system(size: 10, weight: .heavy))
+                    .foregroundStyle(.white.opacity(0.86))
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(.white.opacity(0.12), in: Capsule())
+                }
+                .buttonStyle(.plain)
+                .help("Remove \(url.lastPathComponent)")
+            }
+        }
+    }
+
+    private func pickAttachments() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = true
+        if panel.runModal() == .OK {
+            for url in panel.urls where !model.draftAttachments.contains(url) {
+                model.draftAttachments.append(url)
+            }
+        }
+        fieldFocused = true
+    }
+
+    private func submit() {
+        let trimmed = model.draftText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty || !model.draftAttachments.isEmpty else { return }
+        let prompt = Self.composePrompt(trimmed, attachments: model.draftAttachments)
+        let send = model.submitText
+        model.draftText = ""
+        model.draftAttachments = []
+        fieldFocused = false
+        model.isInputFocused = false
+        send(prompt)
+        model.closeNotch()
+    }
+
+    private static func isImage(_ url: URL) -> Bool {
+        imageExtensions.contains(url.pathExtension.lowercased())
+    }
+
+    /// Folds attachment paths into the prompt text so the existing
+    /// `(String) -> Void` submit closure carries them without an API change.
+    private static func composePrompt(_ text: String, attachments: [URL]) -> String {
+        guard !attachments.isEmpty else { return text }
+        let request = text.isEmpty ? "Please review the attached file(s)." : text
+        let lines = attachments.enumerated().map { index, url in
+            "\(index + 1). \(isImage(url) ? "Image" : "Document"): \(url.path)"
+        }.joined(separator: "\n")
+        return "\(request)\n\nOpenClicky notch input attachments:\n\(lines)"
     }
 }
 
@@ -391,6 +572,7 @@ private struct OpenClickyDynamicNotchKitMiniMeter: View {
 final class OpenClickyDynamicNotchKitBridge {
     func showCollapsed(on screen: NSScreen, accentColor: NSColor, foregroundAppIcon: NSImage?, foregroundAppName: String, hasRunningAgentWork: Bool, agentLiveActivity: OpenClickyAgentLiveActivity = OpenClickyAgentLiveActivity(), openMainPanel: @escaping () -> Void, opensExpanded: Bool = false) {}
     func showVoice(_ phase: OpenClickyNotchVoicePhase, audioPowerLevel: CGFloat, on screen: NSScreen, accentColor: NSColor, foregroundAppIcon: NSImage?, foregroundAppName: String, openMainPanel: @escaping () -> Void, opensExpanded: Bool = false) {}
+    func showTextInput(on screen: NSScreen, accentColor: NSColor, foregroundAppIcon: NSImage?, foregroundAppName: String, submitText: @escaping (String) -> Void) {}
     func open(on screen: NSScreen) {}
     func close(on screen: NSScreen) {}
     func updateAudioPowerLevel(_ audioPowerLevel: CGFloat) {}

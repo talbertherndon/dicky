@@ -41,75 +41,10 @@ enum OpenClickyNotchVoicePhase {
     case responding
 }
 
-private enum OpenClickyNotchCaptureAction: String, CaseIterable {
-    case ask
-    case aiText
-    case agent
-
-    var title: String {
-        switch self {
-        case .ask: return "Voice"
-        case .aiText: return "Text"
-        case .agent: return "Agent"
-        }
-    }
-
-    var systemImage: String {
-        switch self {
-        case .ask: return "waveform"
-        case .aiText: return "textformat"
-        case .agent: return "terminal.fill"
-        }
-    }
-}
-
-private struct OpenClickyNotchCaptureSuggestion {
-    enum Kind {
-        case slashCommand
-        case mention
-
-        init?(trigger: Character) {
-            switch trigger {
-            case "/": self = .slashCommand
-            case "@": self = .mention
-            default: return nil
-            }
-        }
-    }
-
-    let token: String
-    let title: String
-    let systemImage: String
-
-    static func candidates(for kind: Kind) -> [OpenClickyNotchCaptureSuggestion] {
-        switch kind {
-        case .slashCommand:
-            return [
-                OpenClickyNotchCaptureSuggestion(token: "/agent", title: "start background work", systemImage: "shippingbox"),
-                OpenClickyNotchCaptureSuggestion(token: "/voice", title: "use shared voice context", systemImage: "waveform"),
-                OpenClickyNotchCaptureSuggestion(token: "/screen", title: "include screen context", systemImage: "rectangle.dashed"),
-                OpenClickyNotchCaptureSuggestion(token: "/workspace", title: "current workspace", systemImage: "folder"),
-                OpenClickyNotchCaptureSuggestion(token: "/skills", title: "available skills", systemImage: "sparkles"),
-                OpenClickyNotchCaptureSuggestion(token: "/tools", title: "available tools", systemImage: "wrench.and.screwdriver")
-            ]
-        case .mention:
-            return [
-                OpenClickyNotchCaptureSuggestion(token: "@agent", title: "background agent", systemImage: "shippingbox"),
-                OpenClickyNotchCaptureSuggestion(token: "@voice", title: "main voice thread", systemImage: "waveform"),
-                OpenClickyNotchCaptureSuggestion(token: "@screen", title: "visible screen", systemImage: "rectangle.dashed"),
-                OpenClickyNotchCaptureSuggestion(token: "@workspace", title: "current workspace", systemImage: "folder"),
-                OpenClickyNotchCaptureSuggestion(token: "@skills", title: "skills", systemImage: "sparkles"),
-                OpenClickyNotchCaptureSuggestion(token: "@tools", title: "tools", systemImage: "wrench.and.screwdriver")
-            ]
-        }
-    }
-}
-
 @MainActor
 final class OpenClickyNotchCaptureWindowManager {
     private enum ActiveMode {
         case collapsedText
-        case text
         case voice
     }
 
@@ -372,7 +307,7 @@ final class OpenClickyNotchCaptureWindowManager {
             )
             isUsingDynamicNotchKitStatusSurface = true
             return true
-        case .text, .none:
+        case .none:
             return false
         }
         #else
@@ -400,9 +335,27 @@ final class OpenClickyNotchCaptureWindowManager {
     }
 
     func showTextInput(accentTheme: ClickyAccentTheme? = nil, submitText: @escaping (String) -> Void) {
-        hideDynamicNotchKitStatusSurface()
         let accentColor = Self.nsAccentColor(for: accentTheme)
-        expandTextInput(accentColor: accentColor, submitText: submitText)
+        persistentAccentColor = accentColor
+        persistentSubmitText = submitText
+        // Expand on the display the user is currently working on (active
+        // window / pointer), not the built-in notched display.
+        pinAnchorScreenToPointerIfNeeded()
+        guard let screen = preferredAnchorScreen() ?? NSScreen.main else {
+            hideDynamicNotchKitStatusSurface()
+            return
+        }
+        // The "Ask Clicky" prompt now lives inside the DynamicNotchKit notch's
+        // expanded view rather than the standalone capture panel.
+        panel?.orderOut(nil)
+        isUsingDynamicNotchKitStatusSurface = true
+        dynamicNotchKitBridge.showTextInput(
+            on: screen,
+            accentColor: accentColor,
+            foregroundAppIcon: foregroundAppIcon,
+            foregroundAppName: foregroundAppName,
+            submitText: submitText
+        )
     }
 
     func updateVoiceState(_ voicePhase: OpenClickyNotchVoicePhase, audioPowerLevel: CGFloat) {
@@ -418,7 +371,6 @@ final class OpenClickyNotchCaptureWindowManager {
                 }
             }
         case .listening, .processing, .responding:
-            guard activeMode != .text else { return }
             activeMode = .voice
             let primaryScreen = preferredAnchorScreen()
             let hidesStatusText = Self.hidesVoiceStatusText(on: primaryScreen)
@@ -492,11 +444,7 @@ final class OpenClickyNotchCaptureWindowManager {
             hidesAppNameText: Self.hidesCollapsedAppNameText(on: preferredAnchorScreen()),
             expand: { [weak self] in
                 self?.pinAnchorScreenToPointerIfNeeded()
-                if let showMainPanel = self?.persistentShowMainPanel {
-                    showMainPanel()
-                } else {
-                    self?.expandTextInput(accentColor: accentColor, submitText: submitText)
-                }
+                self?.persistentShowMainPanel?()
             },
             dismiss: { [weak self] in self?.collapseToPill(accentColor: accentColor, submitText: submitText) }
         )
@@ -513,21 +461,6 @@ final class OpenClickyNotchCaptureWindowManager {
             hideDynamicNotchKitStatusSurface()
             panel?.orderOut(nil)
         }
-    }
-
-    private func expandTextInput(accentColor: NSColor, submitText: @escaping (String) -> Void) {
-        stopCollapsedHoverProbe()
-        activeMode = .text
-        persistentAccentColor = accentColor
-        persistentSubmitText = submitText
-        ensureCaptureContentView(width: Self.expandedPanelWidth, height: Self.textPanelHeight)
-        contentView?.configureText(
-            accentColor: accentColor,
-            submitText: submitText,
-            dismiss: { [weak self] in self?.collapseToPill(accentColor: accentColor, submitText: submitText) }
-        )
-        showPanel(activating: true, width: Self.expandedPanelWidth, height: Self.textPanelHeight)
-        contentView?.focusTextField()
     }
 
     func showMainInterfacePanel(companionManager: CompanionManager, focusedAgentSessionID: UUID? = nil) {
@@ -1469,9 +1402,6 @@ final class OpenClickyNotchCaptureWindowManager {
             widthForScreen = { [foregroundAppName] screen in
                 Self.collapsedPanelWidth(for: screen, appName: foregroundAppName)
             }
-        case .text:
-            // Expanded text input has a fixed canvas; leave it alone.
-            return
         }
         let primaryScreen = preferredAnchorScreen() ?? NSScreen.main ?? panel.screen ?? NSScreen.screens.first
         guard let primaryScreen else { return }
@@ -1553,10 +1483,9 @@ final class OpenClickyNotchCaptureWindowManager {
     }
 }
 
-private final class OpenClickyNotchCaptureRootView: NSView, NSTextFieldDelegate {
+private final class OpenClickyNotchCaptureRootView: NSView {
     private enum Mode {
         case collapsed
-        case text
         case voice
     }
 
@@ -1568,16 +1497,7 @@ private final class OpenClickyNotchCaptureRootView: NSView, NSTextFieldDelegate 
     fileprivate var shellHeightConstraint: NSLayoutConstraint?
     fileprivate var shellCenterXConstraint: NSLayoutConstraint?
     fileprivate var shellTopConstraint: NSLayoutConstraint?
-    private let textStack = NSStackView()
     private let voiceStack = NSStackView()
-    private let titleLabel = NSTextField(labelWithString: "Ask OpenClicky")
-    private let subtitleLabel = NSTextField(labelWithString: "Menu-bar notch surface, existing fast voice stack, local agent handoff.")
-    private let inputShell = OpenClickyRoundedView(cornerRadius: 21)
-    private let textField = NSTextField()
-    private let attachmentStack = NSStackView()
-    private let dropOverlayLabel = NSTextField(labelWithString: "Drop to attach")
-    private let suggestionStack = NSStackView()
-    private let actionStack = NSStackView()
     private let voiceTitleLabel = NSTextField(labelWithString: "Listening")
     private let voiceSubtitleLabel = NSTextField(labelWithString: "")
     private let voiceCopyStack = NSStackView()
@@ -1595,45 +1515,20 @@ private final class OpenClickyNotchCaptureRootView: NSView, NSTextFieldDelegate 
     private let collapsedAppNameLabel = NSTextField(labelWithString: "Current app")
     private var hidesCollapsedAppNameText = false
     private var mode: Mode = .voice
-    private var submitText: ((String) -> Void)?
     private var dismiss: (() -> Void)?
     private var expand: (() -> Void)?
     private var accentColor = NSColor(calibratedRed: 0.20, green: 0.50, blue: 1.00, alpha: 1.0)
-    private var droppedAttachments: [NotchDraftAttachment] = []
-    private var isDropTargeted = false
-
-    private struct NotchDraftAttachment: Equatable {
-        enum Kind {
-            case image
-            case document
-        }
-
-        let url: URL
-        let kind: Kind
-
-        var chipTitle: String {
-            url.lastPathComponent.isEmpty ? url.path : url.lastPathComponent
-        }
-
-        var systemImage: String {
-            kind == .image ? "photo" : "doc"
-        }
-    }
 
     private static let collapsedLabelMaxWidth: CGFloat = 300
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         buildViewHierarchy()
-        registerForDraggedTypes([.fileURL, .URL, .png, .tiff])
-        configureText(accentColor: accentColor, submitText: { _ in }, dismiss: {})
     }
 
     required init?(coder: NSCoder) {
         super.init(coder: coder)
         buildViewHierarchy()
-        registerForDraggedTypes([.fileURL, .URL, .png, .tiff])
-        configureText(accentColor: accentColor, submitText: { _ in }, dismiss: {})
     }
 
     deinit {
@@ -1644,8 +1539,6 @@ private final class OpenClickyNotchCaptureRootView: NSView, NSTextFieldDelegate 
         switch mode {
         case .collapsed:
             shellView.fillColor = OpenClickyLiquidGlassBackdropView.isLiquidGlassAvailable ? NSColor.black.withAlphaComponent(0.34) : NSColor.black.withAlphaComponent(0.93)
-        case .text:
-            shellView.fillColor = OpenClickyLiquidGlassBackdropView.isLiquidGlassAvailable ? NSColor.black.withAlphaComponent(0.44) : NSColor(calibratedRed: 0.025, green: 0.036, blue: 0.032, alpha: 0.96)
         case .voice:
             shellView.fillColor = OpenClickyLiquidGlassBackdropView.isLiquidGlassAvailable ? NSColor.black.withAlphaComponent(0.30) : NSColor.black.withAlphaComponent(0.91)
         }
@@ -1658,7 +1551,6 @@ private final class OpenClickyNotchCaptureRootView: NSView, NSTextFieldDelegate 
         self.expand = expand
         self.dismiss = dismiss
         hidesCollapsedAppNameText = hidesAppNameText
-        textStack.isHidden = true
         voiceStack.isHidden = true
         let nameIsPlaceholder = foregroundAppName.trimmingCharacters(in: .whitespaces).isEmpty
             || foregroundAppName == "Current app"
@@ -1685,39 +1577,6 @@ private final class OpenClickyNotchCaptureRootView: NSView, NSTextFieldDelegate 
         needsDisplay = true
     }
 
-    func configureText(accentColor: NSColor, submitText: @escaping (String) -> Void, dismiss: @escaping () -> Void) {
-        mode = .text
-        self.accentColor = accentColor
-        self.submitText = submitText
-        self.dismiss = dismiss
-        self.expand = nil
-        notchHandle.isHidden = true
-        shellView.isHidden = false
-        shellGlassView.isHidden = false
-        shellGlassView.configure(cornerRadius: 24, roundsTopCorners: true, accentColor: accentColor, strength: .expanded)
-        shellView.roundsTopCorners = true
-        textStack.isHidden = false
-        voiceStack.isHidden = true
-        collapsedAppIconView.isHidden = true
-        collapsedAppNameLabel.isHidden = true
-        collapsedPlayIconView.isHidden = true
-        collapsedAgentDotsView.isHidden = true
-        shellView.cornerRadius = 24
-        updateShellViewFillColor()
-        shellView.borderColor = NSColor.white.withAlphaComponent(0.085)
-        shellView.roundedShadowColor = NSColor.black.withAlphaComponent(0.46)
-        shellView.roundedShadowBlurRadius = 16
-        shellView.roundedShadowOffset = NSSize(width: 0, height: -8)
-        updateAccentColors()
-        droppedAttachments.removeAll()
-        updateAttachments()
-        updateSuggestions()
-        textField.stringValue = ""
-        setDropTargeted(false)
-        updateShellConstraints(animated: true)
-        window?.makeFirstResponder(textField)
-    }
-
     func configureVoice(
         phase: OpenClickyNotchVoicePhase,
         audioPowerLevel: CGFloat,
@@ -1735,7 +1594,6 @@ private final class OpenClickyNotchCaptureRootView: NSView, NSTextFieldDelegate 
         shellGlassView.isHidden = false
         shellGlassView.configure(cornerRadius: 17, roundsTopCorners: false, accentColor: accentColor, strength: .compact)
         shellView.roundsTopCorners = false
-        textStack.isHidden = true
         voiceStack.isHidden = false
         voicePhaseIconView.isHidden = !hidesStatusText
         voiceCopyStack.isHidden = hidesStatusText
@@ -1788,15 +1646,9 @@ private final class OpenClickyNotchCaptureRootView: NSView, NSTextFieldDelegate 
             shellGlassView.configure(cornerRadius: 17, roundsTopCorners: false, accentColor: accentColor, strength: .compact)
         case .voice:
             shellGlassView.configure(cornerRadius: 17, roundsTopCorners: false, accentColor: accentColor, strength: .compact)
-        case .text:
-            shellGlassView.configure(cornerRadius: 24, roundsTopCorners: true, accentColor: accentColor, strength: .expanded)
         }
         updateAccentColors()
         needsDisplay = true
-    }
-
-    func focusTextField() {
-        window?.makeFirstResponder(textField)
     }
 
     func setCanvas(size: NSSize, animated: Bool = false) {
@@ -1874,9 +1726,6 @@ private final class OpenClickyNotchCaptureRootView: NSView, NSTextFieldDelegate 
             case .voice:
                 targetWidth = notchWidth * 2.0
                 targetHeight = max(38, safeAreaTop + 6)
-            case .text:
-                targetWidth = 520
-                targetHeight = 226
             }
         } else {
             targetWidth = bounds.width
@@ -1958,7 +1807,6 @@ private final class OpenClickyNotchCaptureRootView: NSView, NSTextFieldDelegate 
         // avoids "drag fires expand as well" double-events.
 
         configureForegroundAppIconViews()
-        configureTextStack()
         configureVoiceStack()
 
         let widthConstraint = shellView.widthAnchor.constraint(equalToConstant: bounds.width)
@@ -2065,119 +1913,6 @@ private final class OpenClickyNotchCaptureRootView: NSView, NSTextFieldDelegate 
         needsDisplay = true
     }
 
-    private func configureTextStack() {
-        textStack.orientation = .vertical
-        textStack.alignment = .leading
-        textStack.spacing = 10
-        textStack.translatesAutoresizingMaskIntoConstraints = false
-        shellView.addSubview(textStack)
-
-        let header = NSStackView()
-        header.orientation = .horizontal
-        header.alignment = .top
-        header.spacing = 10
-        header.translatesAutoresizingMaskIntoConstraints = false
-        header.addArrangedSubview(makeIconOrb(systemName: "sparkles"))
-
-        let copyStack = NSStackView()
-        copyStack.orientation = .vertical
-        copyStack.alignment = .leading
-        copyStack.spacing = 2
-        titleLabel.font = .systemFont(ofSize: 17, weight: .heavy)
-        titleLabel.textColor = NSColor.white.withAlphaComponent(0.96)
-        subtitleLabel.stringValue = "Type a task, drop files, then send."
-        subtitleLabel.font = .systemFont(ofSize: 11, weight: .semibold)
-        subtitleLabel.textColor = NSColor.white.withAlphaComponent(0.64)
-        subtitleLabel.maximumNumberOfLines = 2
-        copyStack.addArrangedSubview(titleLabel)
-        copyStack.addArrangedSubview(subtitleLabel)
-        header.addArrangedSubview(copyStack)
-
-        configureInputRow()
-        textStack.addArrangedSubview(inputShell)
-
-        attachmentStack.orientation = .horizontal
-        attachmentStack.alignment = .centerY
-        attachmentStack.spacing = 6
-        attachmentStack.translatesAutoresizingMaskIntoConstraints = false
-        attachmentStack.isHidden = true
-        textStack.addArrangedSubview(attachmentStack)
-        attachmentStack.heightAnchor.constraint(equalToConstant: 24).isActive = true
-
-        suggestionStack.orientation = .horizontal
-        suggestionStack.alignment = .centerY
-        suggestionStack.spacing = 5
-        suggestionStack.translatesAutoresizingMaskIntoConstraints = false
-        textStack.addArrangedSubview(suggestionStack)
-        suggestionStack.heightAnchor.constraint(equalToConstant: 18).isActive = true
-
-        actionStack.orientation = .horizontal
-        actionStack.alignment = .centerY
-        actionStack.distribution = .fillEqually
-        actionStack.spacing = 8
-        actionStack.translatesAutoresizingMaskIntoConstraints = false
-        for action in OpenClickyNotchCaptureAction.allCases {
-            actionStack.addArrangedSubview(makeActionButton(action))
-        }
-        actionStack.isHidden = true
-        textStack.addArrangedSubview(actionStack)
-        actionStack.heightAnchor.constraint(equalToConstant: 40).isActive = true
-
-        NSLayoutConstraint.activate([
-            textStack.topAnchor.constraint(equalTo: shellView.topAnchor, constant: 16),
-            textStack.leadingAnchor.constraint(equalTo: shellView.leadingAnchor, constant: 16),
-            textStack.trailingAnchor.constraint(equalTo: shellView.trailingAnchor, constant: -16),
-            inputShell.widthAnchor.constraint(equalTo: textStack.widthAnchor),
-            actionStack.widthAnchor.constraint(equalTo: textStack.widthAnchor)
-        ])
-    }
-
-    private func configureInputRow() {
-        inputShell.translatesAutoresizingMaskIntoConstraints = false
-        inputShell.fillColor = NSColor.black.withAlphaComponent(0.22)
-        inputShell.borderColor = NSColor.white.withAlphaComponent(0.10)
-
-        let row = NSStackView()
-        row.orientation = .horizontal
-        row.alignment = .centerY
-        row.spacing = 8
-        row.translatesAutoresizingMaskIntoConstraints = false
-        inputShell.addSubview(row)
-        dropOverlayLabel.translatesAutoresizingMaskIntoConstraints = false
-        dropOverlayLabel.font = .systemFont(ofSize: 12, weight: .heavy)
-        dropOverlayLabel.textColor = NSColor.white.withAlphaComponent(0.92)
-        dropOverlayLabel.isHidden = true
-        inputShell.addSubview(dropOverlayLabel)
-
-        let bubbleIcon = makeSmallIcon(systemName: "text.bubble.fill")
-        row.addArrangedSubview(bubbleIcon)
-
-        textField.isBordered = false
-        textField.isBezeled = false
-        textField.drawsBackground = false
-        textField.focusRingType = .none
-        textField.font = .systemFont(ofSize: 13, weight: .semibold)
-        textField.textColor = NSColor.white.withAlphaComponent(0.95)
-        textField.placeholderString = "Ask Clicky…"
-        textField.delegate = self
-        row.addArrangedSubview(textField)
-
-        row.addArrangedSubview(makeGlyphButton(systemName: "paperclip", tooltip: "Drop files anywhere on this OpenClicky input", action: { }))
-        row.addArrangedSubview(makeGlyphButton(systemName: "arrow.up.circle.fill", tooltip: "Send OpenClicky task", action: { [weak self] in self?.submit(.ask) }))
-        row.addArrangedSubview(makeGlyphButton(systemName: "xmark.circle.fill", tooltip: "Close OpenClicky capture", action: { [weak self] in self?.dismiss?() }))
-
-        NSLayoutConstraint.activate([
-            inputShell.heightAnchor.constraint(equalToConstant: 42),
-            row.leadingAnchor.constraint(equalTo: inputShell.leadingAnchor, constant: 14),
-            row.trailingAnchor.constraint(equalTo: inputShell.trailingAnchor, constant: -12),
-            row.centerYAnchor.constraint(equalTo: inputShell.centerYAnchor),
-            dropOverlayLabel.centerXAnchor.constraint(equalTo: inputShell.centerXAnchor),
-            dropOverlayLabel.centerYAnchor.constraint(equalTo: inputShell.centerYAnchor),
-            bubbleIcon.widthAnchor.constraint(equalToConstant: 24),
-            bubbleIcon.heightAnchor.constraint(equalToConstant: 24)
-        ])
-    }
-
     private func configureVoiceStack() {
         voiceStack.orientation = .horizontal
         voiceStack.alignment = .centerY
@@ -2237,94 +1972,9 @@ private final class OpenClickyNotchCaptureRootView: NSView, NSTextFieldDelegate 
         voiceStack.isHidden = true
     }
 
-    private func makeIconOrb(systemName: String) -> NSView {
-        let container = OpenClickyRoundedView(cornerRadius: 17)
-        container.translatesAutoresizingMaskIntoConstraints = false
-        container.fillColor = accentColor.withAlphaComponent(0.16)
-        container.borderColor = accentColor.withAlphaComponent(0.12)
-        let imageView = NSImageView(image: NSImage(systemSymbolName: systemName, accessibilityDescription: nil) ?? NSImage())
-        imageView.translatesAutoresizingMaskIntoConstraints = false
-        imageView.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 16, weight: .heavy)
-        imageView.contentTintColor = accentColor
-        container.addSubview(imageView)
-        NSLayoutConstraint.activate([
-            container.widthAnchor.constraint(equalToConstant: 34),
-            container.heightAnchor.constraint(equalToConstant: 34),
-            imageView.centerXAnchor.constraint(equalTo: container.centerXAnchor),
-            imageView.centerYAnchor.constraint(equalTo: container.centerYAnchor),
-            imageView.widthAnchor.constraint(equalToConstant: 18),
-            imageView.heightAnchor.constraint(equalToConstant: 18)
-        ])
-        return container
-    }
-
-    private func makeSmallIcon(systemName: String) -> NSView {
-        let container = OpenClickyRoundedView(cornerRadius: 12)
-        container.translatesAutoresizingMaskIntoConstraints = false
-        container.fillColor = accentColor.withAlphaComponent(0.13)
-        let imageView = NSImageView(image: NSImage(systemSymbolName: systemName, accessibilityDescription: nil) ?? NSImage())
-        imageView.translatesAutoresizingMaskIntoConstraints = false
-        imageView.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 11, weight: .heavy)
-        imageView.contentTintColor = accentColor
-        container.addSubview(imageView)
-        NSLayoutConstraint.activate([
-            imageView.centerXAnchor.constraint(equalTo: container.centerXAnchor),
-            imageView.centerYAnchor.constraint(equalTo: container.centerYAnchor),
-            imageView.widthAnchor.constraint(equalToConstant: 13),
-            imageView.heightAnchor.constraint(equalToConstant: 13)
-        ])
-        return container
-    }
-
-    private func makeGlyphButton(systemName: String, tooltip: String, action: @escaping () -> Void) -> NSButton {
-        let button = OpenClickyClosureButton(systemName: systemName, title: nil, action: action)
-        button.symbolPointSize = 16
-        button.contentTintColor = NSColor.white.withAlphaComponent(0.66)
-        button.toolTip = tooltip
-        NSLayoutConstraint.activate([
-            button.widthAnchor.constraint(equalToConstant: 22),
-            button.heightAnchor.constraint(equalToConstant: 22)
-        ])
-        return button
-    }
-
-    private func makeActionButton(_ action: OpenClickyNotchCaptureAction) -> NSView {
-        let button = OpenClickyActionPillButton(
-            title: action.title,
-            systemName: action.systemImage,
-            isPrimary: action == .ask,
-            action: { [weak self] in self?.submit(action) }
-        )
-        button.accentColor = accentColor
-        button.toolTip = action.title
-        button.translatesAutoresizingMaskIntoConstraints = false
-        return button
-    }
-
-    private func makeSuggestionButton(_ suggestion: OpenClickyNotchCaptureSuggestion) -> NSButton {
-        let button = OpenClickyClosureButton(systemName: suggestion.systemImage, title: "\(suggestion.token)  \(suggestion.title)", action: { [weak self] in
-            self?.applySuggestion(suggestion)
-        })
-        button.symbolPointSize = 10
-        button.font = .systemFont(ofSize: 9, weight: .semibold)
-        button.contentTintColor = NSColor.white.withAlphaComponent(0.88)
-        button.cornerRadius = 8
-        button.fillColor = NSColor.white.withAlphaComponent(0.105)
-        button.borderColor = NSColor.white.withAlphaComponent(0.10)
-        button.toolTip = suggestion.title
-        return button
-    }
-
     private func updateAccentColors() {
         waveformView.accentColor = accentColor
-        updateButtons(in: actionStack)
         shellView.needsDisplay = true
-    }
-
-    private func updateButtons(in stack: NSStackView) {
-        for case let button as OpenClickyActionPillButton in stack.arrangedSubviews {
-            button.accentColor = accentColor
-        }
     }
 
     private func updateVoiceLabels(for phase: OpenClickyNotchVoicePhase, foregroundAppName _: String, hidesStatusText: Bool) {
@@ -2355,227 +2005,6 @@ private final class OpenClickyNotchCaptureRootView: NSView, NSTextFieldDelegate 
         }
         voicePhaseIconView.image = NSImage(systemSymbolName: symbolName, accessibilityDescription: voiceTitleLabel.stringValue)
         voicePhaseIconView.contentTintColor = accentColor
-    }
-
-    private func updateAttachments() {
-        attachmentStack.arrangedSubviews.forEach { view in
-            attachmentStack.removeArrangedSubview(view)
-            view.removeFromSuperview()
-        }
-        attachmentStack.isHidden = droppedAttachments.isEmpty
-        guard !droppedAttachments.isEmpty else { return }
-
-        for attachment in droppedAttachments.prefix(4) {
-            attachmentStack.addArrangedSubview(makeAttachmentChip(attachment))
-        }
-        if droppedAttachments.count > 4 {
-            let moreLabel = NSTextField(labelWithString: "+\(droppedAttachments.count - 4) more")
-            moreLabel.font = .systemFont(ofSize: 10, weight: .heavy)
-            moreLabel.textColor = NSColor.white.withAlphaComponent(0.62)
-            attachmentStack.addArrangedSubview(moreLabel)
-        }
-    }
-
-    private func makeAttachmentChip(_ attachment: NotchDraftAttachment) -> NSView {
-        let chip = OpenClickyClosureButton(systemName: attachment.systemImage, title: attachment.chipTitle, action: { [weak self] in
-            self?.droppedAttachments.removeAll { $0.url.standardizedFileURL == attachment.url.standardizedFileURL }
-            self?.updateAttachments()
-        })
-        chip.symbolPointSize = 9
-        chip.font = .systemFont(ofSize: 10, weight: .heavy)
-        chip.contentTintColor = NSColor.white.withAlphaComponent(0.88)
-        chip.cornerRadius = 10
-        chip.fillColor = NSColor.white.withAlphaComponent(0.13)
-        chip.borderColor = NSColor.white.withAlphaComponent(0.10)
-        chip.toolTip = "Remove \(attachment.chipTitle)"
-        return chip
-    }
-
-    private func promptWithAttachments(_ prompt: String) -> String {
-        guard !droppedAttachments.isEmpty else { return prompt }
-        let request = prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Please review the attached file(s)." : prompt
-        let attachmentLines = droppedAttachments.enumerated().map { index, attachment in
-            "\(index + 1). \(attachment.kind == .image ? "Image" : "Document"): \(attachment.url.path)"
-        }.joined(separator: "\n")
-        return """
-        \(request)
-
-        OpenClicky notch input attachments:
-        \(attachmentLines)
-        """.trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-
-    private func updateSuggestions() {
-        suggestionStack.arrangedSubviews.forEach { view in
-            suggestionStack.removeArrangedSubview(view)
-            view.removeFromSuperview()
-        }
-
-        guard let trigger = currentTrigger() else {
-            suggestionStack.isHidden = true
-            return
-        }
-        suggestionStack.isHidden = false
-
-        let candidates = OpenClickyNotchCaptureSuggestion.candidates(for: trigger.kind)
-        let filtered = trigger.query.isEmpty
-            ? candidates
-            : candidates.filter {
-                $0.token.dropFirst().localizedCaseInsensitiveContains(trigger.query)
-                    || $0.title.localizedCaseInsensitiveContains(trigger.query)
-            }
-        for suggestion in filtered.prefix(5) {
-            suggestionStack.addArrangedSubview(makeSuggestionButton(suggestion))
-        }
-    }
-
-    private func submit(_ action: OpenClickyNotchCaptureAction) {
-        let submitted = routedText(for: action)
-        guard !submitted.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-        submitText?(submitted)
-        textField.stringValue = ""
-        droppedAttachments.removeAll()
-        updateAttachments()
-        updateSuggestions()
-        dismiss?()
-    }
-
-    private func routedText(for action: OpenClickyNotchCaptureAction) -> String {
-        let trimmed = textField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        let stripped = Self.strippingLeadingAgentToken(from: trimmed)
-        if action == .agent || stripped.didStrip {
-            let request = stripped.text.trimmingCharacters(in: .whitespacesAndNewlines)
-            let routedRequest = request.isEmpty && !droppedAttachments.isEmpty ? "Please review the attached file(s)." : request
-            guard !routedRequest.isEmpty else { return "" }
-            return promptWithAttachments("ask an agent to \(routedRequest)")
-        }
-        return promptWithAttachments(trimmed)
-    }
-
-    private static func strippingLeadingAgentToken(from rawText: String) -> (text: String, didStrip: Bool) {
-        var value = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
-        let lowercased = value.lowercased()
-        for token in ["/agent", "@agent"] {
-            if lowercased == token {
-                return ("", true)
-            }
-            if lowercased.hasPrefix("\(token) ") {
-                value.removeFirst(token.count)
-                return (value.trimmingCharacters(in: .whitespacesAndNewlines), true)
-            }
-        }
-        return (value, false)
-    }
-
-    private func applySuggestion(_ suggestion: OpenClickyNotchCaptureSuggestion) {
-        guard let trigger = currentTrigger() else { return }
-        var value = textField.stringValue
-        value.replaceSubrange(trigger.range, with: "\(suggestion.token) ")
-        textField.stringValue = value
-        updateSuggestions()
-        window?.makeFirstResponder(textField)
-    }
-
-    private func currentTrigger() -> (kind: OpenClickyNotchCaptureSuggestion.Kind, query: String, range: Range<String.Index>)? {
-        let value = textField.stringValue
-        guard let tokenRange = value.range(of: #"(?<!\S)[/@][A-Za-z0-9_-]*$"#, options: .regularExpression) else {
-            return nil
-        }
-        let token = String(value[tokenRange])
-        guard let first = token.first,
-              let kind = OpenClickyNotchCaptureSuggestion.Kind(trigger: first) else {
-            return nil
-        }
-        return (kind, String(token.dropFirst()), tokenRange)
-    }
-
-    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
-        guard mode == .text, pasteboardHasSupportedDrop(sender.draggingPasteboard) else { return [] }
-        setDropTargeted(true)
-        return .copy
-    }
-
-    override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation {
-        guard mode == .text, pasteboardHasSupportedDrop(sender.draggingPasteboard) else { return [] }
-        return .copy
-    }
-
-    override func draggingExited(_ sender: NSDraggingInfo?) {
-        setDropTargeted(false)
-    }
-
-    override func draggingEnded(_ sender: NSDraggingInfo) {
-        setDropTargeted(false)
-    }
-
-    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
-        defer { setDropTargeted(false) }
-        guard mode == .text else { return false }
-        return addAttachments(from: sender.draggingPasteboard)
-    }
-
-    private func pasteboardHasSupportedDrop(_ pasteboard: NSPasteboard) -> Bool {
-        pasteboard.canReadObject(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true])
-            || pasteboard.data(forType: .png) != nil
-            || pasteboard.data(forType: .tiff) != nil
-    }
-
-    private func addAttachments(from pasteboard: NSPasteboard) -> Bool {
-        var accepted = false
-        if let urls = pasteboard.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL] {
-            for url in urls where url.isFileURL {
-                addAttachment(url.standardizedFileURL)
-                accepted = true
-            }
-        }
-        if let pngData = pasteboard.data(forType: .png), let url = Self.persistDroppedImage(pngData, extension: "png") {
-            addAttachment(url, forcedKind: .image)
-            accepted = true
-        } else if let tiffData = pasteboard.data(forType: .tiff),
-                  let bitmap = NSBitmapImageRep(data: tiffData),
-                  let pngData = bitmap.representation(using: .png, properties: [:]),
-                  let url = Self.persistDroppedImage(pngData, extension: "png") {
-            addAttachment(url, forcedKind: .image)
-            accepted = true
-        }
-        if accepted {
-            updateAttachments()
-            window?.makeFirstResponder(textField)
-        }
-        return accepted
-    }
-
-    private func addAttachment(_ url: URL, forcedKind: NotchDraftAttachment.Kind? = nil) {
-        let standardizedURL = url.standardizedFileURL
-        guard droppedAttachments.contains(where: { $0.url.standardizedFileURL == standardizedURL }) == false else { return }
-        droppedAttachments.append(NotchDraftAttachment(url: standardizedURL, kind: forcedKind ?? Self.attachmentKind(for: standardizedURL)))
-    }
-
-    private func setDropTargeted(_ targeted: Bool) {
-        isDropTargeted = targeted
-        inputShell.borderColor = targeted ? accentColor.withAlphaComponent(0.78) : NSColor.white.withAlphaComponent(0.10)
-        inputShell.fillColor = targeted ? accentColor.withAlphaComponent(0.16) : NSColor.black.withAlphaComponent(0.22)
-        dropOverlayLabel.isHidden = !targeted
-        inputShell.needsDisplay = true
-    }
-
-    private static func attachmentKind(for url: URL) -> NotchDraftAttachment.Kind {
-        let imageExtensions: Set<String> = ["png", "jpg", "jpeg", "gif", "heic", "webp", "tiff", "bmp"]
-        return imageExtensions.contains(url.pathExtension.lowercased()) ? .image : .document
-    }
-
-    private static func persistDroppedImage(_ data: Data, extension pathExtension: String) -> URL? {
-        let directory = FileManager.default
-            .homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Application Support/OpenClicky/AgentMode/DroppedAttachments", isDirectory: true)
-        do {
-            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-            let url = directory.appendingPathComponent("notch-input-drop-\(UUID().uuidString).\(pathExtension)")
-            try data.write(to: url, options: .atomic)
-            return url
-        } catch {
-            return nil
-        }
     }
 
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
@@ -2617,21 +2046,6 @@ private final class OpenClickyNotchCaptureRootView: NSView, NSTextFieldDelegate 
         super.mouseUp(with: event)
     }
 
-    func controlTextDidChange(_ obj: Notification) {
-        updateSuggestions()
-    }
-
-    func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
-        if commandSelector == #selector(NSResponder.insertNewline(_:)) {
-            submit(.ask)
-            return true
-        }
-        if commandSelector == #selector(NSResponder.cancelOperation(_:)) {
-            dismiss?()
-            return true
-        }
-        return false
-    }
 }
 
 final class OpenClickyLiquidGlassBackdropView: NSView {
@@ -3163,137 +2577,6 @@ private final class OpenClickyRoundedView: NSView {
         
         path.closeSubpath()
         return path
-    }
-}
-
-private final class OpenClickyActionPillButton: NSControl {
-    private let label: String
-    private let systemName: String
-    private let isPrimary: Bool
-    private let onAction: () -> Void
-
-    var accentColor: NSColor = .systemBlue { didSet { needsDisplay = true } }
-
-    init(title: String, systemName: String, isPrimary: Bool, action: @escaping () -> Void) {
-        self.label = title
-        self.systemName = systemName
-        self.isPrimary = isPrimary
-        self.onAction = action
-        super.init(frame: .zero)
-        wantsLayer = true
-        setContentHuggingPriority(.defaultLow, for: .horizontal)
-        setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-    }
-
-    required init?(coder: NSCoder) {
-        self.label = ""
-        self.systemName = "circle"
-        self.isPrimary = false
-        self.onAction = {}
-        super.init(coder: coder)
-        wantsLayer = true
-    }
-
-    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
-
-    override var intrinsicContentSize: NSSize {
-        NSSize(width: 96, height: 40)
-    }
-
-    override func mouseDown(with event: NSEvent) {
-        onAction()
-    }
-
-    override func draw(_ dirtyRect: NSRect) {
-        let rect = bounds.insetBy(dx: 1, dy: 1)
-        let radius = rect.height / 2
-        let path = NSBezierPath(roundedRect: rect, xRadius: radius, yRadius: radius)
-        let fill = isPrimary ? accentColor.withAlphaComponent(0.92) : NSColor.white.withAlphaComponent(0.10)
-        fill.setFill()
-        path.fill()
-        NSColor.white.withAlphaComponent(isPrimary ? 0.16 : 0.13).setStroke()
-        path.lineWidth = 1
-        path.stroke()
-
-        let iconSize = min(16, rect.height - 14)
-        let iconX = rect.minX + 14
-        let iconY = rect.midY - iconSize / 2
-        if let image = NSImage(systemSymbolName: systemName, accessibilityDescription: nil) {
-            image.isTemplate = true
-            let iconRect = NSRect(x: iconX, y: iconY, width: iconSize, height: iconSize)
-            NSGraphicsContext.saveGraphicsState()
-            (isPrimary ? NSColor.white : NSColor.white.withAlphaComponent(0.9)).set()
-            image.draw(in: iconRect, from: .zero, operation: .sourceOver, fraction: 1)
-            NSGraphicsContext.restoreGraphicsState()
-        }
-
-        let titleRect = NSRect(x: iconX + iconSize + 8, y: rect.minY + 1, width: max(10, rect.width - iconSize - 30), height: rect.height - 2)
-        let paragraph = NSMutableParagraphStyle()
-        paragraph.alignment = .center
-        let attributes: [NSAttributedString.Key: Any] = [
-            .font: NSFont.systemFont(ofSize: 13, weight: .heavy),
-            .foregroundColor: NSColor.white.withAlphaComponent(isPrimary ? 1.0 : 0.92),
-            .paragraphStyle: paragraph
-        ]
-        (label as NSString).draw(in: titleRect, withAttributes: attributes)
-    }
-}
-
-private final class OpenClickyClosureButton: NSButton {
-    var onAction: (() -> Void)?
-    var fillColor: NSColor = .clear { didSet { needsDisplay = true } }
-    var borderColor: NSColor = .clear { didSet { needsDisplay = true } }
-    var cornerRadius: CGFloat = 12 { didSet { needsDisplay = true } }
-    var symbolPointSize: CGFloat = 14 { didSet { updateImageConfiguration() } }
-
-    init(systemName: String, title: String?, action: @escaping () -> Void) {
-        self.onAction = action
-        super.init(frame: .zero)
-        translatesAutoresizingMaskIntoConstraints = false
-        isBordered = false
-        bezelStyle = .regularSquare
-        image = NSImage(systemSymbolName: systemName, accessibilityDescription: nil)
-        imagePosition = title == nil ? .imageOnly : .imageLeading
-        self.title = title ?? ""
-        target = self
-        self.action = #selector(runAction)
-        focusRingType = .none
-        wantsLayer = true
-        updateImageConfiguration()
-    }
-
-    required init?(coder: NSCoder) {
-        super.init(coder: coder)
-    }
-
-    override func draw(_ dirtyRect: NSRect) {
-        if fillColor.alphaComponent > 0 || borderColor.alphaComponent > 0 {
-            let path = NSBezierPath(roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5), xRadius: cornerRadius, yRadius: cornerRadius)
-            fillColor.setFill()
-            path.fill()
-            let edgeShadow = NSShadow()
-            edgeShadow.shadowColor = NSColor.black.withAlphaComponent(0.04)
-            edgeShadow.shadowBlurRadius = 0
-            edgeShadow.shadowOffset = NSSize(width: 0, height: -1)
-            edgeShadow.set()
-            borderColor.setStroke()
-            path.lineWidth = 1
-            path.stroke()
-            NSShadow().set()
-        }
-        super.draw(dirtyRect)
-    }
-
-    override func resetCursorRects() {
-        addCursorRect(bounds, cursor: .pointingHand)
-    }
-
-    @objc private func runAction() {
-        onAction?()
-    }
-
-    private func updateImageConfiguration() {
-        symbolConfiguration = NSImage.SymbolConfiguration(pointSize: symbolPointSize, weight: .heavy)
     }
 }
 
