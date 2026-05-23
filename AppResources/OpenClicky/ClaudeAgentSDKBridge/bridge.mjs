@@ -33,6 +33,12 @@ function integerFromEnv(name, fallback) {
   return Number.isFinite(value) && value > 0 ? value : fallback;
 }
 
+function booleanFromEnv(name, fallback = false) {
+  const value = (process.env[name] || "").trim().toLowerCase();
+  if (!value) return fallback;
+  return value === "1" || value === "true" || value === "yes" || value === "on";
+}
+
 const pendingCommands = [];
 const commandWaiters = [];
 let closed = false;
@@ -142,7 +148,15 @@ function assistantText(message) {
 }
 
 function handleSDKMessage(message) {
-  console.error("[Bridge SDK Message]:", JSON.stringify(message));
+  if (booleanFromEnv("OPENCLICKY_CLAUDE_BRIDGE_DEBUG")) {
+    const safeMessage = {
+      type: message?.type,
+      subtype: message?.subtype,
+      is_error: message?.is_error,
+      session_id: message?.session_id
+    };
+    console.error("[Bridge SDK Message]:", JSON.stringify(safeMessage));
+  }
   if (!currentRequestID) return;
 
   if (message.type === "stream_event") {
@@ -210,6 +224,7 @@ try {
   }
 
   emit({ type: "ready", sdkPath });
+  const allowDangerousPermissions = booleanFromEnv("OPENCLICKY_CLAUDE_ALLOW_DANGEROUS_PERMISSIONS");
 
   const options = {
     model: process.env.OPENCLICKY_CLAUDE_MODEL || "claude-sonnet-4-6",
@@ -217,12 +232,12 @@ try {
     cwd: process.env.OPENCLICKY_CLAUDE_CWD || process.cwd(),
     systemPrompt: process.env.OPENCLICKY_CLAUDE_SYSTEM_PROMPT || "You are OpenClicky.",
     pathToClaudeCodeExecutable: process.env.OPENCLICKY_CLAUDE_EXECUTABLE,
-    permissionMode: "bypassPermissions",
-    allowDangerouslySkipPermissions: true,
-    dangerouslyDisableSandbox: true,
+    permissionMode: allowDangerousPermissions ? "bypassPermissions" : "default",
+    allowDangerouslySkipPermissions: allowDangerousPermissions,
+    dangerouslyDisableSandbox: allowDangerousPermissions,
     sandbox: {
-      enabled: false,
-      allowUnsandboxedCommands: true
+      enabled: !allowDangerousPermissions,
+      allowUnsandboxedCommands: allowDangerousPermissions
     },
     includePartialMessages: true,
     includeHookEvents: false,

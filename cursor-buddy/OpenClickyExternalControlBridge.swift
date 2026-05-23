@@ -153,15 +153,19 @@ final class OpenClickyExternalControlBridgeServer: @unchecked Sendable {
         }
 
         if request.method == "GET", request.path == "/health" || request.path == "/" {
-            sendJSON([
+            var body: [String: Any] = [
                 "ok": true,
                 "name": "OpenClicky External Control Bridge",
                 "port": port,
                 "transport": "local-http+sse",
                 "tools": ["openclicky_point", "openclicky_point_many", "show_cursor", "show_cursors", "show_caption", "screenshot", "clear", "speak", "notify"],
                 "multiToolEndpoints": ["/mcp/calls", "/tools/calls"],
-                "proxyEndpoints": ["/v1/messages", "/v1/responses", "/v1/chat/completions"]
-            ], statusCode: 200, on: connection)
+                "inferenceProxyEnabled": AppBundleConfiguration.externalInferenceProxyEnabled()
+            ]
+            if AppBundleConfiguration.externalInferenceProxyEnabled() {
+                body["proxyEndpoints"] = ["/v1/messages", "/v1/responses", "/v1/chat/completions"]
+            }
+            sendJSON(body, statusCode: 200, on: connection)
             return
         }
 
@@ -176,6 +180,14 @@ final class OpenClickyExternalControlBridgeServer: @unchecked Sendable {
         }
 
         if isInferenceProxyEndpoint(request.path) {
+            guard AppBundleConfiguration.externalInferenceProxyEnabled() else {
+                sendJSON(["ok": false, "error": "Inference proxy is disabled."], statusCode: 404, on: connection)
+                return
+            }
+            guard hasValidBridgeToken(request) else {
+                sendJSON(["ok": false, "error": "Inference proxy requires a valid OpenClicky bridge token."], statusCode: 401, on: connection)
+                return
+            }
             proxyInferenceRequest(request, on: connection)
             return
         }
@@ -288,6 +300,18 @@ final class OpenClickyExternalControlBridgeServer: @unchecked Sendable {
 
     private func isInferenceProxyEndpoint(_ path: String) -> Bool {
         path == "/v1/responses" || path == "/v1/chat/completions" || path == "/v1/messages"
+    }
+
+    private func hasValidBridgeToken(_ request: HTTPRequest) -> Bool {
+        guard let configuredToken = AppBundleConfiguration.externalControlBridgeToken(),
+              !configuredToken.isEmpty else { return false }
+        if request.headers["x-openclicky-token"] == configuredToken {
+            return true
+        }
+        if request.headers["authorization"] == "Bearer \(configuredToken)" {
+            return true
+        }
+        return false
     }
 
     private func proxyInferenceRequest(_ request: HTTPRequest, on connection: NWConnection) {
@@ -419,7 +443,7 @@ final class OpenClickyExternalControlBridgeServer: @unchecked Sendable {
 
     private func sendRawResponse(_ responseData: Data, statusCode: Int, contentType: String, extraHeaders: [String: String] = [:], on connection: NWConnection) {
         let reason = Self.reasonPhrase(for: statusCode)
-        var headers = "HTTP/1.1 \(statusCode) \(reason)\r\nContent-Type: \(contentType)\r\nContent-Length: \(responseData.count)\r\nConnection: close\r\nAccess-Control-Allow-Origin: http://127.0.0.1\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type, Authorization, x-api-key, anthropic-version, anthropic-beta, OpenAI-Organization, OpenAI-Project, OpenAI-Beta\r\n"
+        var headers = "HTTP/1.1 \(statusCode) \(reason)\r\nContent-Type: \(contentType)\r\nContent-Length: \(responseData.count)\r\nConnection: close\r\nAccess-Control-Allow-Origin: http://127.0.0.1\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type, Authorization, x-api-key, x-openclicky-token, anthropic-version, anthropic-beta, OpenAI-Organization, OpenAI-Project, OpenAI-Beta\r\n"
         for (key, value) in extraHeaders.sorted(by: { $0.key < $1.key }) {
             headers += "\(key): \(value)\r\n"
         }

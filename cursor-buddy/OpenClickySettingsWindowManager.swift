@@ -179,10 +179,10 @@ struct OpenClickySettingsView: View {
     @StateObject private var openPetsCatalog = OpenPetsCatalogStore()
     @AppStorage(ClickyAccentTheme.userDefaultsKey) private var selectedAccentThemeID = ClickyAccentTheme.blue.rawValue
     @AppStorage(ClickyCursorAvatarStyle.userDefaultsKey) private var avatarStyleRawValue = ClickyCursorAvatarStyle.default.storageValue
-    @AppStorage(AppBundleConfiguration.userAnthropicAPIKeyDefaultsKey) private var userAnthropicAPIKey = ""
-    @AppStorage(AppBundleConfiguration.userElevenLabsAPIKeyDefaultsKey) private var userElevenLabsAPIKey = ""
+    @State private var userAnthropicAPIKey = ""
+    @State private var userElevenLabsAPIKey = ""
     @AppStorage(AppBundleConfiguration.userElevenLabsVoiceIDDefaultsKey) private var userElevenLabsVoiceID = ""
-    @AppStorage(AppBundleConfiguration.userCartesiaAPIKeyDefaultsKey) private var userCartesiaAPIKey = ""
+    @State private var userCartesiaAPIKey = ""
     @AppStorage(AppBundleConfiguration.userCartesiaVoiceIDDefaultsKey) private var userCartesiaVoiceID = ""
     @AppStorage(AppBundleConfiguration.userOpenAIRealtimeVoiceIDDefaultsKey) private var userOpenAIRealtimeVoiceID = "marin"
     @AppStorage(AppBundleConfiguration.userMicrosoftEdgeVoiceIDDefaultsKey) private var userMicrosoftEdgeVoiceID = "en-US-EmmaMultilingualNeural"
@@ -198,9 +198,9 @@ struct OpenClickySettingsView: View {
     @AppStorage(AppBundleConfiguration.userAppLineSpacingDefaultsKey) private var appLineSpacing = 2.0
     @AppStorage(AppBundleConfiguration.userAppBoldTextDefaultsKey) private var appBoldTextEnabled = false
     @AppStorage(AppBundleConfiguration.openClickyVoicePlaybackVolumeDefaultsKey) private var openClickyVoicePlaybackVolume = AppBundleConfiguration.voicePlaybackVolume()
-    @AppStorage(AppBundleConfiguration.userCodexAgentAPIKeyDefaultsKey) private var userCodexAgentAPIKey = ""
-    @AppStorage(AppBundleConfiguration.userAssemblyAIAPIKeyDefaultsKey) private var userAssemblyAIAPIKey = ""
-    @AppStorage(AppBundleConfiguration.userDeepgramAPIKeyDefaultsKey) private var userDeepgramAPIKey = ""
+    @State private var userCodexAgentAPIKey = ""
+    @State private var userAssemblyAIAPIKey = ""
+    @State private var userDeepgramAPIKey = ""
     @AppStorage(AppBundleConfiguration.userMCPDeveloperDocsEnabledDefaultsKey) private var mcpDeveloperDocsEnabled = false
     @AppStorage(AppBundleConfiguration.userMCPComputerUseEnabledDefaultsKey) private var mcpComputerUseEnabled = false
     @AppStorage(AppBundleConfiguration.userMCPCuaDriverCommandDefaultsKey) private var mcpCuaDriverCommand = CuaDriverMCPConfiguration.resolvedCommandPath() ?? ""
@@ -310,7 +310,17 @@ struct OpenClickySettingsView: View {
         }
         .onAppear {
             refreshNotificationAuthorizationStatus()
+            loadConfiguredSecretsForEditing()
         }
+    }
+
+    private func loadConfiguredSecretsForEditing() {
+        userCodexAgentAPIKey = AppBundleConfiguration.openAIAPIKey() ?? ""
+        userAnthropicAPIKey = AppBundleConfiguration.anthropicAPIKey() ?? ""
+        userAssemblyAIAPIKey = AppBundleConfiguration.assemblyAIAPIKey() ?? ""
+        userDeepgramAPIKey = AppBundleConfiguration.deepgramAPIKey() ?? ""
+        userElevenLabsAPIKey = AppBundleConfiguration.elevenLabsAPIKey() ?? ""
+        userCartesiaAPIKey = AppBundleConfiguration.cartesiaAPIKey() ?? ""
     }
 
     private var sidebar: some View {

@@ -168,9 +168,25 @@ final class OpenClickyAgentManager: ObservableObject {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/bin/launchctl")
         process.arguments = ["load", plistPath]
+        let errorPipe = Pipe()
+        process.standardError = errorPipe
         try process.run()
         process.waitUntilExit()
         installLog.info("performInstall: launchctl load exit=\(process.terminationStatus, privacy: .public)")
+        guard process.terminationStatus == 0 else {
+            let errorData = errorPipe.fileHandleForReading.readDataToEndOfFile()
+            let errorText = String(data: errorData, encoding: .utf8)?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            throw NSError(
+                domain: "OpenClickyAgent",
+                code: Int(process.terminationStatus),
+                userInfo: [
+                    NSLocalizedDescriptionKey: errorText?.isEmpty == false
+                        ? "launchctl load failed: \(errorText!)"
+                        : "launchctl load failed with exit code \(process.terminationStatus)."
+                ]
+            )
+        }
     }
 
     func uninstallService() throws {
@@ -804,9 +820,10 @@ final class OpenClickyAgentManager: ObservableObject {
 
     // MARK: - Settings Sync
 
-    /// Reads provider keys from OpenClicky's user settings and writes/merges them
-    /// into the daemon's config.json. Safe to call repeatedly. Idempotent — only
-    /// writes when something actually changed.
+    /// Reads provider availability from OpenClicky's user settings and writes
+    /// non-secret defaults into the daemon config. Secret provider keys are not
+    /// copied into config.json unless the user has explicitly enabled the legacy
+    /// plaintext sync escape hatch.
     @discardableResult
     func syncProvidersFromSettings() -> Bool {
         let anthropic = AppBundleConfiguration.anthropicAPIKey()?.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -822,18 +839,22 @@ final class OpenClickyAgentManager: ObservableObject {
 
         var changed = false
 
-        func setProviderKey(_ provider: String, key: String?) {
-            guard let key, !key.isEmpty else { return }
+        func updateProviderSecret(_ provider: String, key: String?) {
             var entry = (root[provider] as? [String: Any]) ?? [:]
-            if (entry["apiKey"] as? String) != key {
+            if AppBundleConfiguration.agentPlaintextProviderSyncEnabled(), let key, !key.isEmpty {
+                guard (entry["apiKey"] as? String) != key else { return }
                 entry["apiKey"] = key
+                root[provider] = entry
+                changed = true
+            } else if entry["apiKey"] != nil {
+                entry.removeValue(forKey: "apiKey")
                 root[provider] = entry
                 changed = true
             }
         }
 
-        setProviderKey("anthropic", key: anthropic)
-        setProviderKey("openai", key: openai)
+        updateProviderSecret("anthropic", key: anthropic)
+        updateProviderSecret("openai", key: openai)
 
         // Pick a sensible default provider/model when none is configured yet.
         var agents = (root["agents"] as? [String: Any]) ?? [:]

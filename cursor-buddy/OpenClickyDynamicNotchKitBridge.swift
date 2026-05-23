@@ -380,8 +380,16 @@ private final class OpenClickyDynamicNotchKitModel: ObservableObject {
 
 @MainActor
 final class OpenClickyDynamicNotchKitBridge {
+    private enum PresentationState {
+        case hidden
+        case compact
+        case expanded
+    }
+
     private let model = OpenClickyDynamicNotchKitModel()
     private var targetScreen: NSScreen?
+    private var presentationState: PresentationState = .hidden
+    private var presentationScreenID: CGDirectDisplayID?
     private lazy var notch: DynamicNotch<OpenClickyDynamicNotchKitExpandedView, OpenClickyDynamicNotchKitCompactLeadingView, OpenClickyDynamicNotchKitCompactTrailingView> = {
         let notch = DynamicNotch(
             hoverBehavior: [.hapticFeedback, .increaseShadow, .keepVisible],
@@ -405,7 +413,7 @@ final class OpenClickyDynamicNotchKitBridge {
             self.model.isExpanded = false
             let screen = self.currentTargetScreen()
             if self.model.hidesWhenClosed {
-                Task { await self.notch.hide() }
+                Task { await self.hideNotchIfNeeded() }
             } else {
                 Task { await self.compactNotch(on: screen) }
             }
@@ -426,17 +434,29 @@ final class OpenClickyDynamicNotchKitBridge {
         if let currentScreen = notch.windowController?.window?.screen,
            currentScreen.displayID != screen.displayID {
             await notch.hide()
+            presentationState = .hidden
+            presentationScreenID = nil
         }
+    }
+
+    private func shouldApplyPresentation(_ state: PresentationState, on screen: NSScreen) -> Bool {
+        presentationState != state || presentationScreenID != screen.displayID
     }
 
     private func expandNotch(on screen: NSScreen) async {
         await prepareNotchForPresentation(on: screen)
+        guard shouldApplyPresentation(.expanded, on: screen) else { return }
         await notch.expand(on: screen)
+        presentationState = .expanded
+        presentationScreenID = screen.displayID
     }
 
     private func compactNotch(on screen: NSScreen) async {
         await prepareNotchForPresentation(on: screen)
+        guard shouldApplyPresentation(.compact, on: screen) else { return }
         await notch.compact(on: screen)
+        presentationState = .compact
+        presentationScreenID = screen.displayID
     }
 
     func showCollapsed(
@@ -581,10 +601,17 @@ final class OpenClickyDynamicNotchKitBridge {
         Task { await compactNotch(on: screen) }
     }
 
+    private func hideNotchIfNeeded() async {
+        guard presentationState != .hidden || notch.windowController?.window?.isVisible == true else { return }
+        await notch.hide()
+        presentationState = .hidden
+        presentationScreenID = nil
+    }
+
     func hide() {
         model.contextSuggestion = nil
         model.isExpanded = false
-        Task { await notch.hide() }
+        Task { await hideNotchIfNeeded() }
     }
 }
 

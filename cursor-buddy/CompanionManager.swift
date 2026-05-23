@@ -1568,12 +1568,7 @@ final class CompanionManager: ObservableObject {
     }
 
     private func persistOptionalSecret(_ value: String, defaultsKey: String) {
-        let trimmedValue = value.trimmingCharacters(in: .whitespacesAndNewlines)
-        if trimmedValue.isEmpty {
-            UserDefaults.standard.removeObject(forKey: defaultsKey)
-        } else {
-            UserDefaults.standard.set(trimmedValue, forKey: defaultsKey)
-        }
+        AppBundleConfiguration.persistSecret(value, defaultsKey: defaultsKey)
     }
 
     /// User preference for whether the OpenClicky cursor should be shown.

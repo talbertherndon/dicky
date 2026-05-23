@@ -6,6 +6,7 @@
 //
 
 import Foundation
+import Security
 
 nonisolated enum AppBundleConfiguration {
     static let userAnthropicAPIKeyDefaultsKey = "openClickyAnthropicAPIKey"
@@ -44,6 +45,9 @@ nonisolated enum AppBundleConfiguration {
     static let userMCPDeveloperDocsEnabledDefaultsKey = "openClickyMCPDeveloperDocsEnabled"
     static let userMCPComputerUseEnabledDefaultsKey = "openClickyMCPComputerUseEnabled"
     static let userMCPCuaDriverCommandDefaultsKey = "openClickyMCPCuaDriverCommand"
+    static let userExternalInferenceProxyEnabledDefaultsKey = "openClickyExternalInferenceProxyEnabled"
+    static let userExternalControlBridgeTokenDefaultsKey = "openClickyExternalControlBridgeToken"
+    static let userAgentPlaintextProviderSyncEnabledDefaultsKey = "openClickyAgentPlaintextProviderSyncEnabled"
     static let userDesktopNotificationsEnabledDefaultsKey = "openClickyDesktopNotificationsEnabled"
     static let userWidgetsEnabledDefaultsKey = "openClickyWidgetsEnabled"
     static let userWidgetsIncludeAgentTaskNamesDefaultsKey = "openClickyWidgetsIncludeAgentTaskNames"
@@ -115,6 +119,23 @@ nonisolated enum AppBundleConfiguration {
             )
             ?? localDevelopmentEnvironmentValue(forKey: CuaDriverMCPConfiguration.environmentOverrideKey)
             ?? CuaDriverMCPConfiguration.resolvedCommandPath()
+    }
+
+    static func externalInferenceProxyEnabled() -> Bool {
+        userDefaultsBool(forKey: userExternalInferenceProxyEnabledDefaultsKey, defaultValue: false)
+            || normalizedConfigurationValue(ProcessInfo.processInfo.environment["OPENCLICKY_EXTERNAL_INFERENCE_PROXY_ENABLED"]) == "1"
+            || normalizedConfigurationValue(ProcessInfo.processInfo.environment["OPENCLICKY_EXTERNAL_INFERENCE_PROXY_ENABLED"])?.lowercased() == "true"
+    }
+
+    static func externalControlBridgeToken() -> String? {
+        userDefaultsValue(forKey: userExternalControlBridgeTokenDefaultsKey) ?? stringValue(
+            forKey: "OpenClickyExternalControlBridgeToken",
+            environmentKeys: ["OPENCLICKY_BRIDGE_TOKEN"]
+        ) ?? localDevelopmentEnvironmentValue(forKey: "OPENCLICKY_BRIDGE_TOKEN")
+    }
+
+    static func agentPlaintextProviderSyncEnabled() -> Bool {
+        userDefaultsBool(forKey: userAgentPlaintextProviderSyncEnabledDefaultsKey, defaultValue: false)
     }
 
     static func assemblyAIAPIKey() -> String? {
@@ -235,7 +256,28 @@ nonisolated enum AppBundleConfiguration {
     }
 
     private static func userDefaultsValue(forKey key: String) -> String? {
-        normalizedConfigurationValue(UserDefaults.standard.string(forKey: key))
+        if keychainBackedDefaultsKeys.contains(key) {
+            if let keychainValue = keychainValue(forKey: key) {
+                return keychainValue
+            }
+            if let migrated = normalizedConfigurationValue(UserDefaults.standard.string(forKey: key)) {
+                _ = setKeychainValue(migrated, forKey: key)
+                UserDefaults.standard.removeObject(forKey: key)
+                return migrated
+            }
+            return nil
+        }
+        return normalizedConfigurationValue(UserDefaults.standard.string(forKey: key))
+    }
+
+    static func persistSecret(_ value: String, defaultsKey: String) {
+        let trimmedValue = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmedValue.isEmpty {
+            deleteKeychainValue(forKey: defaultsKey)
+        } else {
+            _ = setKeychainValue(trimmedValue, forKey: defaultsKey)
+        }
+        UserDefaults.standard.removeObject(forKey: defaultsKey)
     }
 
     static func stringValue(forKey key: String, environmentKeys: [String] = []) -> String? {
@@ -279,6 +321,64 @@ nonisolated enum AppBundleConfiguration {
         }
 
         return nil
+    }
+
+    private static let keychainService = "com.jkneen.openclicky.secrets"
+
+    private static let keychainBackedDefaultsKeys: Set<String> = [
+        userAnthropicAPIKeyDefaultsKey,
+        userElevenLabsAPIKeyDefaultsKey,
+        userCartesiaAPIKeyDefaultsKey,
+        userCodexAgentAPIKeyDefaultsKey,
+        userAssemblyAIAPIKeyDefaultsKey,
+        userDeepgramAPIKeyDefaultsKey,
+        userExternalControlBridgeTokenDefaultsKey
+    ]
+
+    private static func keychainValue(forKey key: String) -> String? {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: keychainService,
+            kSecAttrAccount as String: key,
+            kSecReturnData as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne
+        ]
+        var item: CFTypeRef?
+        guard SecItemCopyMatching(query as CFDictionary, &item) == errSecSuccess,
+              let data = item as? Data else { return nil }
+        return normalizedConfigurationValue(String(data: data, encoding: .utf8))
+    }
+
+    @discardableResult
+    private static func setKeychainValue(_ value: String, forKey key: String) -> Bool {
+        guard let data = value.data(using: .utf8) else { return false }
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: keychainService,
+            kSecAttrAccount as String: key
+        ]
+        let attributes: [String: Any] = [
+            kSecValueData as String: data,
+            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+        ]
+
+        let status = SecItemUpdate(query as CFDictionary, attributes as CFDictionary)
+        if status == errSecSuccess { return true }
+        if status != errSecItemNotFound { return false }
+
+        var addQuery = query
+        addQuery[kSecValueData as String] = data
+        addQuery[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+        return SecItemAdd(addQuery as CFDictionary, nil) == errSecSuccess
+    }
+
+    private static func deleteKeychainValue(forKey key: String) {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: keychainService,
+            kSecAttrAccount as String: key
+        ]
+        SecItemDelete(query as CFDictionary)
     }
 
     private static func localDevelopmentEnvironmentFileURLs() -> [URL] {
