@@ -831,6 +831,10 @@ final class OpenClickyBrowserAgentRunner {
 
 
         SDK CALL PROTOCOL
+        You are inside the Browser Workspace runner. Do not use host web
+        search, terminal commands, local file tools, or any external browser.
+        The only actions that count are JSON tool calls from the list above,
+        executed by OpenClicky against the active WKWebView tab.
         To execute a tool, reply with ONLY a JSON object of the form:
         { "tool": "tool_name", "input": { ... } }
         No prose, no markdown — JSON object only when you intend to call a tool.

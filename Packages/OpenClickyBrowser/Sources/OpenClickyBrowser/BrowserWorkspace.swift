@@ -1986,16 +1986,12 @@ private final class OpenClickyBrowserWorkspaceModel: ObservableObject, OpenClick
             return
         }
 
-        // Only take the deterministic fast-paths for SHORT, SINGLE-INTENT
-        // prompts. Anything with multi-step connectives ("then", "and then",
-        // "after that", "next", ";") or more than ~12 words is sent to the
-        // CUA agent so it can plan and execute autonomously.
+        // Only take visible, in-page deterministic fast-paths for SHORT,
+        // SINGLE-INTENT prompts. Anything that needs web research/results or
+        // multi-step browsing falls through to the CUA agent so OpenClicky
+        // drives the active Browser Workspace tab instead of fetching search
+        // results invisibly in the background.
         let isSingleStepPrompt = Self.looksLikeSingleStepPrompt(prompt)
-
-        if isSingleStepPrompt, let browserPlan = OpenClickyBrowserResearchPlan(prompt: prompt) {
-            performBrowserResearchPlan(browserPlan)
-            return
-        }
 
         if isSingleStepPrompt, let directAction = OpenClickyBrowserDirectPageAction(prompt: prompt) {
             performDirectPageAction(directAction)
@@ -2010,17 +2006,19 @@ private final class OpenClickyBrowserWorkspaceModel: ObservableObject, OpenClick
 
             // The CUA agent can run whenever we have a usable provider — the
             // direct Anthropic HTTP path (needs an Anthropic key) OR the
-            // Claude Agent SDK fallback (which the host configures with its
-            // own credentials). The "is the selected model tagged Anthropic"
-            // flag is informational — if the SDK is wired we can still drive
-            // the browser through it.
+            // Claude Agent SDK fallback. Do not route this through Codex voice:
+            // Codex does not receive the Browser Workspace tool loop and can
+            // satisfy web-looking requests with host web search instead of the
+            // active built-in browser tab.
             let canRunCUA = !apiKey.isEmpty || sdkAvailable
 
             if canRunCUA {
-                // Always pass the user's selected computer-use model ID
-                // through. The runner's HTTP path needs an Anthropic-valid
-                // ID; the SDK fallback accepts whatever the host configured.
-                let effectiveModel = modelID
+                // The direct HTTP runner requires an Anthropic model. If the
+                // user currently has a Codex computer-use model selected but
+                // an Anthropic key/Claude SDK is what is available for browser
+                // control, fall back to the default Claude browser model
+                // instead of sending an invalid Codex model to Anthropic.
+                let effectiveModel = usesAnthropicBrowserModel ? modelID : "claude-sonnet-4-6"
                 isRunningBrowserPlan = true
                 browserAgentStatus = "Starting browser agent…"
                 let history = browserAgentPriorTurns
@@ -2037,7 +2035,7 @@ private final class OpenClickyBrowserWorkspaceModel: ObservableObject, OpenClick
             } else {
                 // No usable provider — be honest about why instead of
                 // dumping page text or claiming capability we don't have.
-                let diagnostic = "I can't run the autonomous browser agent because OpenClicky has no Anthropic API key and no Claude Agent SDK configured. Add an Anthropic API key in Settings (or sign into the Claude Agent SDK) and try again."
+                let diagnostic = "I can't run the autonomous browser agent because OpenClicky has no Anthropic API key and no Claude Agent SDK configured. Codex voice is not used here because it cannot execute the Browser Workspace tool loop and may answer from web search instead of the active tab."
                 messages.append(
                     OpenClickyBrowserChatMessage(role: "OpenClicky", text: diagnostic, isUser: false)
                 )

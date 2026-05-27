@@ -18,16 +18,19 @@ private final class OpenClickyNotchCapturePanel: NSPanel {
 }
 
 enum OpenClickyWindowLevels {
-    /// The compact notch/dynamic-island status surface sits above normal apps.
-    static let statusSurface = NSWindow.Level.statusBar
+    /// The compact notch/dynamic-island status surface sits above normal apps
+    /// and the macOS menu/status bar. Matching `.statusBar` exactly lets
+    /// AppKit reorder the external fallback pill under the menu bar when
+    /// displays/spaces settle, which makes it appear to vanish and reappear.
+    static let statusSurface = NSWindow.Level(rawValue: NSWindow.Level.statusBar.rawValue + 1)
 
     /// The main OpenClicky panel must sit above the status surface so hovering
     /// the dynamic island cannot visually cut into the panel's side chrome.
-    static let mainPanel = NSWindow.Level(rawValue: NSWindow.Level.statusBar.rawValue + 1)
+    static let mainPanel = NSWindow.Level(rawValue: NSWindow.Level.statusBar.rawValue + 2)
 
     /// First-party dialogs and document windows float one step above the main
     /// panel so they never tuck underneath when launched from OpenClicky.
-    static let panelDialog = NSWindow.Level(rawValue: NSWindow.Level.statusBar.rawValue + 2)
+    static let panelDialog = NSWindow.Level(rawValue: NSWindow.Level.statusBar.rawValue + 3)
 
     static func applyPanelDialogLevel(to window: NSWindow?) {
         window?.level = panelDialog
@@ -94,6 +97,10 @@ final class OpenClickyNotchCaptureWindowManager {
     private static let builtInMainPanelMaximumWidth: CGFloat = mainPanelWidth
     private static let statusPanelWidthScale: CGFloat = 0.24
     private static let statusPanelHorizontalNudge: CGFloat = 0
+    fileprivate static let builtInStatusTrailingInset: CGFloat = 20
+    fileprivate static let externalStatusTrailingInset: CGFloat = 24
+    fileprivate static let builtInVoiceTrailingInset: CGFloat = 20
+    fileprivate static let externalVoiceTrailingInset: CGFloat = 26
     private static let minimumBuiltInCollapsedPanelWidth: CGFloat = 76
     private static let compactBuiltInVoicePanelWidth: CGFloat = 112
     private static let minimumVoicePanelWidth: CGFloat = 180
@@ -746,7 +753,7 @@ final class OpenClickyNotchCaptureWindowManager {
         capturePanel.hasShadow = false
         capturePanel.hidesOnDeactivate = false
         capturePanel.isReleasedWhenClosed = false
-        capturePanel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        capturePanel.collectionBehavior = [.canJoinAllSpaces, .stationary, .fullScreenAuxiliary]
         capturePanel.isMovableByWindowBackground = false
         capturePanel.titleVisibility = .hidden
         capturePanel.titlebarAppearsTransparent = true
@@ -1846,6 +1853,7 @@ private final class OpenClickyNotchCaptureRootView: NSView {
     private var collapsedStackLeadingConstraint: NSLayoutConstraint?
     private var collapsedPlayIconTrailingConstraint: NSLayoutConstraint?
     private var collapsedAgentDotsTrailingConstraint: NSLayoutConstraint?
+    private var voiceStackTrailingConstraint: NSLayoutConstraint?
     private let voiceNotchSpacer = NSView()
     private let waveformView = OpenClickyNotchWaveformNSView()
     private let collapsedAppIconView = NSImageView()
@@ -2095,15 +2103,17 @@ private final class OpenClickyNotchCaptureRootView: NSView {
             
             if isOnNotchScreen {
                 self.collapsedStackLeadingConstraint?.constant = 18
-                self.collapsedPlayIconTrailingConstraint?.constant = -20
-                self.collapsedAgentDotsTrailingConstraint?.constant = -20
+                self.collapsedPlayIconTrailingConstraint?.constant = -OpenClickyNotchCaptureWindowManager.builtInStatusTrailingInset
+                self.collapsedAgentDotsTrailingConstraint?.constant = -OpenClickyNotchCaptureWindowManager.builtInStatusTrailingInset
+                self.voiceStackTrailingConstraint?.constant = -OpenClickyNotchCaptureWindowManager.builtInVoiceTrailingInset
                 
                 self.voiceNotchSpacer.isHidden = false
                 self.voiceCopyStack.setContentHuggingPriority(.defaultHigh, for: .horizontal)
             } else {
                 self.collapsedStackLeadingConstraint?.constant = 10
-                self.collapsedPlayIconTrailingConstraint?.constant = -16
-                self.collapsedAgentDotsTrailingConstraint?.constant = -16
+                self.collapsedPlayIconTrailingConstraint?.constant = -OpenClickyNotchCaptureWindowManager.externalStatusTrailingInset
+                self.collapsedAgentDotsTrailingConstraint?.constant = -OpenClickyNotchCaptureWindowManager.externalStatusTrailingInset
+                self.voiceStackTrailingConstraint?.constant = -OpenClickyNotchCaptureWindowManager.externalVoiceTrailingInset
 
                 // The voice pill can be wider than its intrinsic contents on
                 // external/fallback surfaces. Keep the middle spacer alive in
@@ -2251,8 +2261,8 @@ private final class OpenClickyNotchCaptureRootView: NSView {
         collapsedAgentDotsView.isHidden = true
         shellView.addSubview(collapsedAgentDotsView)
 
-        let playIconTrailing = collapsedPlayIconView.trailingAnchor.constraint(equalTo: shellView.trailingAnchor, constant: -16)
-        let agentDotsTrailing = collapsedAgentDotsView.trailingAnchor.constraint(equalTo: shellView.trailingAnchor, constant: -16)
+        let playIconTrailing = collapsedPlayIconView.trailingAnchor.constraint(equalTo: shellView.trailingAnchor, constant: CGFloat(-OpenClickyNotchCaptureWindowManager.externalStatusTrailingInset))
+        let agentDotsTrailing = collapsedAgentDotsView.trailingAnchor.constraint(equalTo: shellView.trailingAnchor, constant: CGFloat(-OpenClickyNotchCaptureWindowManager.externalStatusTrailingInset))
         let stackLeading = collapsedStack.leadingAnchor.constraint(equalTo: shellView.leadingAnchor, constant: 10)
 
         collapsedPlayIconTrailingConstraint = playIconTrailing
@@ -2350,9 +2360,11 @@ private final class OpenClickyNotchCaptureRootView: NSView {
 
         // Pin the two voice groups to opposite sides of the pill: icon/status
         // on the left, live waveform/indicator on the right.
+        let voiceTrailing = voiceStack.trailingAnchor.constraint(equalTo: shellView.trailingAnchor, constant: CGFloat(-OpenClickyNotchCaptureWindowManager.externalVoiceTrailingInset))
+        voiceStackTrailingConstraint = voiceTrailing
         NSLayoutConstraint.activate([
             voiceStack.leadingAnchor.constraint(equalTo: shellView.leadingAnchor, constant: 12),
-            voiceStack.trailingAnchor.constraint(equalTo: shellView.trailingAnchor, constant: -18),
+            voiceTrailing,
             voiceStack.centerYAnchor.constraint(equalTo: shellView.centerYAnchor)
         ])
         voiceStack.isHidden = true

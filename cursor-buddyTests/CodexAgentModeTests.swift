@@ -220,6 +220,43 @@ struct CodexAgentModeTests {
         #expect(downloadsRemovalInstruction == nil)
     }
 
+
+    @MainActor @Test func hybridAgentRoutingAllowsForegroundAnswerAndBackgroundWork() throws {
+        let maybeInstruction = CompanionManager.hybridAgentTaskInstruction(
+            from: "Can you explain what is happening here and get an agent to review the logs in the background?"
+        )
+        #expect(maybeInstruction != nil)
+        guard let instruction = maybeInstruction else { return }
+
+        #expect(instruction.lowercased() == "review the logs in the background")
+    }
+
+    @MainActor @Test func hybridAgentRoutingDoesNotStealPureQuestions() throws {
+        #expect(CompanionManager.hybridAgentTaskInstruction(from: "Can you explain what agent mode does?") == nil)
+        #expect(CompanionManager.hybridAgentTaskInstruction(from: "What do you think is on my screen?") == nil)
+    }
+
+    @MainActor @Test func voiceContextKeepsRecentRoutedAgentPromptForFollowUps() throws {
+        let now = Date()
+        let history = CompanionManager.voiceConversationHistoryIncludingRecentUnpairedPrompts(
+            baseHistory: [
+                (
+                    userPlaceholder: "Fix the external monitor notch issue.",
+                    assistantResponse: "OpenClicky is handling that in the background."
+                )
+            ],
+            lastPrompt: "Can you get an agent to find out why agent launch fails halfway through a message?",
+            lastPromptAt: now,
+            previousPrompt: nil,
+            previousPromptAt: nil,
+            now: now
+        )
+
+        #expect(history.count == 2)
+        #expect(history.last?.userPlaceholder == "Can you get an agent to find out why agent launch fails halfway through a message?")
+        #expect(history.last?.assistantResponse.contains("current conversation topic") == true)
+    }
+
     @Test func jsonRPCRequestEncodingMatchesCodexAppServer() throws {
         let request = CodexRPCRequest(id: 7, method: "thread/start", params: [
             "experimentalRawEvents": false,

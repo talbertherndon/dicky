@@ -1915,6 +1915,8 @@ final class MicrosoftEdgeTTSClient: OpenClickyTTSClient {
 final class OpenAIRealtimeSpeechClient: OpenClickyTTSClient {
     nonisolated static let streamSampleRate: Double = 24_000
     private nonisolated static let defaultVoiceID = "marin"
+    private nonisolated static let minimumInputAudioBytes = Int(streamSampleRate * 2 * 0.18)
+    private nonisolated static let minimumInputPeakPower = 0.003
 
     struct BidirectionalVoiceTurnResult {
         let userTranscript: String
@@ -2071,6 +2073,7 @@ final class OpenAIRealtimeSpeechClient: OpenClickyTTSClient {
                 userInfo: [NSLocalizedDescriptionKey: "OpenAI Realtime voice needs a Codex/OpenAI API key in Settings or OPENAI_API_KEY in the launch environment."]
             )
         }
+        try await ensureMicrophonePermission()
         guard var components = URLComponents(string: "wss://api.openai.com/v1/realtime") else {
             throw NSError(domain: "OpenAIRealtimeSpeechClient", code: -1, userInfo: [NSLocalizedDescriptionKey: "OpenAI Realtime WebSocket URL is invalid."])
         }
@@ -2180,6 +2183,26 @@ final class OpenAIRealtimeSpeechClient: OpenClickyTTSClient {
         activeBidirectionalVoiceTurn?.cancel()
         activeBidirectionalVoiceTurn = nil
         stopPlaybackInternal()
+    }
+
+    private func ensureMicrophonePermission() async throws {
+        switch AVCaptureDevice.authorizationStatus(for: .audio) {
+        case .authorized:
+            return
+        case .notDetermined:
+            let granted = await withCheckedContinuation { continuation in
+                AVCaptureDevice.requestAccess(for: .audio) { granted in
+                    continuation.resume(returning: granted)
+                }
+            }
+            guard granted else {
+                throw Self.microphoneInputError("Microphone permission was not granted. OpenClicky could not listen to that voice turn.")
+            }
+        case .denied, .restricted:
+            throw Self.microphoneInputError("Microphone permission is blocked in macOS Privacy settings. OpenClicky could not listen to that voice turn.")
+        @unknown default:
+            throw Self.microphoneInputError("Microphone permission is unavailable. OpenClicky could not listen to that voice turn.")
+        }
     }
 
 
@@ -2419,6 +2442,8 @@ final class OpenAIRealtimeSpeechClient: OpenClickyTTSClient {
         private var bufferedByteCount = 0
         private var sender: ((Data) -> Void)?
         private var hasInstalledInputTap = false
+        private var capturedByteCount = 0
+        private var peakPowerLevel = 0.0
 
         init(
             targetSampleRate: Double,
@@ -2440,7 +2465,7 @@ final class OpenAIRealtimeSpeechClient: OpenClickyTTSClient {
                 Task { @MainActor [onInputPowerLevel] in
                     onInputPowerLevel(powerLevel)
                 }
-                self.handle(pcmData)
+                self.handle(pcmData, powerLevel: powerLevel)
             }
             hasInstalledInputTap = true
             inputEngine.prepare()
@@ -2477,6 +2502,13 @@ final class OpenAIRealtimeSpeechClient: OpenClickyTTSClient {
             }
         }
 
+        func captureStats() -> (byteCount: Int, peakPower: Double) {
+            lock.lock()
+            let stats = (capturedByteCount, peakPowerLevel)
+            lock.unlock()
+            return stats
+        }
+
         private static func audioPowerLevel(from audioBuffer: AVAudioPCMBuffer) -> Double {
             guard let channelData = audioBuffer.floatChannelData else { return 0 }
             let channelCount = Int(audioBuffer.format.channelCount)
@@ -2497,10 +2529,12 @@ final class OpenAIRealtimeSpeechClient: OpenClickyTTSClient {
             return min(1, max(0, Double(rootMeanSquare) * 12))
         }
 
-        private func handle(_ pcmData: Data) {
+        private func handle(_ pcmData: Data, powerLevel: Double) {
             let activeSender: ((Data) -> Void)?
             lock.lock()
             activeSender = sender
+            capturedByteCount += pcmData.count
+            peakPowerLevel = max(peakPowerLevel, powerLevel)
             if activeSender == nil {
                 bufferedChunks.append(pcmData)
                 bufferedByteCount += pcmData.count
@@ -2580,6 +2614,13 @@ final class OpenAIRealtimeSpeechClient: OpenClickyTTSClient {
             routeUserTranscriptBeforeAssistantResponse: (@MainActor @Sendable (String) -> Bool)? = nil
         ) async throws -> BidirectionalVoiceTurnResult {
             stopInputCapture()
+            let inputStats = inputCapture.captureStats()
+            guard inputStats.byteCount >= OpenAIRealtimeSpeechClient.minimumInputAudioBytes,
+                  inputStats.peakPower >= OpenAIRealtimeSpeechClient.minimumInputPeakPower else {
+                throw OpenAIRealtimeSpeechClient.microphoneInputError(
+                    "OpenClicky could not detect usable microphone audio. Check the microphone input or macOS microphone permission and try again."
+                )
+            }
             self.routeUserTranscriptBeforeAssistantResponse = routeUserTranscriptBeforeAssistantResponse
             didCommitInput = true
             try await sendJSON(["type": "input_audio_buffer.commit"])
@@ -2829,6 +2870,10 @@ final class OpenAIRealtimeSpeechClient: OpenClickyTTSClient {
         let errorPayload = event["error"] as? [String: Any]
         let message = errorPayload?["message"] as? String ?? "OpenAI Realtime playback failed."
         return NSError(domain: "OpenAIRealtimeSpeechClient", code: -2, userInfo: [NSLocalizedDescriptionKey: message])
+    }
+
+    private nonisolated static func microphoneInputError(_ message: String) -> NSError {
+        NSError(domain: "OpenAIRealtimeSpeechClient", code: -2000, userInfo: [NSLocalizedDescriptionKey: message])
     }
 
     private nonisolated static func int16Samples(fromLittleEndianPCM data: Data) -> [Int16] {
