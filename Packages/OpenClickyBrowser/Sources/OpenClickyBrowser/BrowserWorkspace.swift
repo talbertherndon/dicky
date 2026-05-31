@@ -1209,6 +1209,13 @@ protocol OpenClickyBrowserWorkspaceModelProtocol: AnyObject {
     func appendAgentMessage(text: String)
     func updateLastAgentMessage(text: String)
     func loadAddress(_ rawValue: String) -> Bool
+    func browserAgentTabSnapshot() -> [[String: Any]]
+    func browserAgentOpenTab(url: String?) -> (success: Bool, summary: String)
+    func browserAgentSwitchTab(index: Int) -> (success: Bool, summary: String)
+    func browserAgentCloseTab(index: Int?) -> (success: Bool, summary: String)
+    func browserAgentGoBack() -> (success: Bool, summary: String)
+    func browserAgentGoForward() -> (success: Bool, summary: String)
+    func browserAgentReload() -> (success: Bool, summary: String)
     func hasAgentSDK() -> Bool
     func analyzeImageWithAgentSDK(
         images: [(data: Data, label: String)],
@@ -2292,6 +2299,92 @@ private final class OpenClickyBrowserWorkspaceModel: ObservableObject, OpenClick
         if tabID == activeTabID {
             addressText = tabs[index].addressText
         }
+    }
+
+    func browserAgentTabSnapshot() -> [[String: Any]] {
+        tabs.enumerated().map { index, tab in
+            [
+                "index": index + 1,
+                "id": tab.id.uuidString,
+                "title": tab.title,
+                "url": tab.currentURL?.absoluteString ?? tab.addressText,
+                "isActive": tab.id == activeTabID,
+                "canGoBack": tab.canGoBack,
+                "canGoForward": tab.canGoForward,
+                "contextStatus": tab.contextStatus,
+                "readableTextCharacterCount": tab.readableTextCharacterCount
+            ]
+        }
+    }
+
+    func browserAgentOpenTab(url rawURL: String?) -> (success: Bool, summary: String) {
+        let tab = OpenClickyBrowserTab(initialURL: nil)
+        tabs.append(tab)
+        activateTab(tab.id)
+
+        let trimmedURL = rawURL?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !trimmedURL.isEmpty {
+            guard loadAddress(trimmedURL) else {
+                return (false, "Opened a new tab, but OpenClicky could not understand '\(trimmedURL)' as a URL or local path.")
+            }
+            return (true, "Opened new tab \(tabs.count) at \(addressText).")
+        }
+
+        return (true, "Opened new tab \(tabs.count) at open-clicky://welcome.")
+    }
+
+    func browserAgentSwitchTab(index: Int) -> (success: Bool, summary: String) {
+        guard tabs.indices.contains(index - 1) else {
+            return (false, "No Browser Workspace tab exists at index \(index).")
+        }
+        let tab = tabs[index - 1]
+        activateTab(tab.id)
+        return (true, "Switched to tab \(index): \(tab.title).")
+    }
+
+    func browserAgentCloseTab(index: Int?) -> (success: Bool, summary: String) {
+        let resolvedIndex: Int
+        if let index {
+            resolvedIndex = index
+        } else if let activeIndex = tabs.firstIndex(where: { $0.id == activeTabID }) {
+            resolvedIndex = activeIndex + 1
+        } else {
+            return (false, "No active Browser Workspace tab is available to close.")
+        }
+
+        guard tabs.indices.contains(resolvedIndex - 1) else {
+            return (false, "No Browser Workspace tab exists at index \(resolvedIndex).")
+        }
+        let title = tabs[resolvedIndex - 1].title
+        closeTab(tabs[resolvedIndex - 1].id)
+        return (true, "Closed tab \(resolvedIndex): \(title).")
+    }
+
+    func browserAgentGoBack() -> (success: Bool, summary: String) {
+        guard let webView = webViews[activeTabID] else {
+            return (false, "The active Browser Workspace tab is not ready yet.")
+        }
+        guard webView.canGoBack else {
+            return (false, "The active Browser Workspace tab has no back history.")
+        }
+        webView.goBack()
+        return (true, "Went back in the active Browser Workspace tab.")
+    }
+
+    func browserAgentGoForward() -> (success: Bool, summary: String) {
+        guard let webView = webViews[activeTabID] else {
+            return (false, "The active Browser Workspace tab is not ready yet.")
+        }
+        guard webView.canGoForward else {
+            return (false, "The active Browser Workspace tab has no forward history.")
+        }
+        webView.goForward()
+        return (true, "Went forward in the active Browser Workspace tab.")
+    }
+
+    func browserAgentReload() -> (success: Bool, summary: String) {
+        reload()
+        return (true, "Reloaded the active Browser Workspace tab.")
     }
 
     func getActiveWebView() -> WKWebView? {

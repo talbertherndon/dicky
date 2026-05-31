@@ -57,6 +57,78 @@ final class OpenClickyBrowserAgentRunner {
             ]
         ],
         [
+            "name": "list_tabs",
+            "description": "List Browser Workspace tabs with their 1-based index, title, URL, active state, and navigation readiness.",
+            "input_schema": [
+                "type": "object",
+                "properties": [:]
+            ]
+        ],
+        [
+            "name": "new_tab",
+            "description": "Open a new Browser Workspace tab, optionally navigating it to a URL immediately.",
+            "input_schema": [
+                "type": "object",
+                "properties": [
+                    "url": [
+                        "type": "string",
+                        "description": "Optional URL or local path to load in the new tab."
+                    ]
+                ]
+            ]
+        ],
+        [
+            "name": "switch_tab",
+            "description": "Switch the active Browser Workspace tab by 1-based tab index from list_tabs.",
+            "input_schema": [
+                "type": "object",
+                "properties": [
+                    "index": [
+                        "type": "number",
+                        "description": "The 1-based tab index to activate."
+                    ]
+                ],
+                "required": ["index"]
+            ]
+        ],
+        [
+            "name": "close_tab",
+            "description": "Close a Browser Workspace tab by 1-based index. If omitted, closes the active tab.",
+            "input_schema": [
+                "type": "object",
+                "properties": [
+                    "index": [
+                        "type": "number",
+                        "description": "Optional 1-based tab index to close."
+                    ]
+                ]
+            ]
+        ],
+        [
+            "name": "browser_back",
+            "description": "Go back in the active Browser Workspace tab history.",
+            "input_schema": [
+                "type": "object",
+                "properties": [:]
+            ]
+        ],
+        [
+            "name": "browser_forward",
+            "description": "Go forward in the active Browser Workspace tab history.",
+            "input_schema": [
+                "type": "object",
+                "properties": [:]
+            ]
+        ],
+        [
+            "name": "browser_reload",
+            "description": "Reload the active Browser Workspace tab.",
+            "input_schema": [
+                "type": "object",
+                "properties": [:]
+            ]
+        ],
+        [
             "name": "screenshot",
             "description": "Capture the current visible webpage viewport as a screenshot to see its visual layout.",
             "input_schema": [
@@ -65,14 +137,22 @@ final class OpenClickyBrowserAgentRunner {
             ]
         ],
         [
+            "name": "observe_page",
+            "description": "Inspect the active page like a browser automation accessibility snapshot: URL, title, viewport, scroll state, readable text, selected text, headings, links, form fields, buttons, and stable element refs. Use this before choosing selectors for multi-step web tasks.",
+            "input_schema": [
+                "type": "object",
+                "properties": [:]
+            ]
+        ],
+        [
             "name": "click",
-            "description": "Click an interactive element (link, button, input, checkbox, radio, etc.) using a CSS selector, XPath, text matching, or contains matching.",
+            "description": "Click an interactive element (link, button, input, checkbox, radio, etc.) using a CSS selector, XPath, text matching, contains matching, or an observe_page ref like ref=3.",
             "input_schema": [
                 "type": "object",
                 "properties": [
                     "selector": [
                         "type": "string",
-                        "description": "The selector. E.g. CSS ('#submit', 'button.login'), XPath ('xpath=//button'), text match ('text=Login'), or contains ('button:contains(\"Log in\")')."
+                        "description": "The selector. E.g. observe_page ref ('ref=3'), CSS ('#submit', 'button.login'), XPath ('xpath=//button'), text match ('text=Login'), or contains ('button:contains(\"Log in\")')."
                     ]
                 ],
                 "required": ["selector"]
@@ -178,7 +258,7 @@ final class OpenClickyBrowserAgentRunner {
         ],
         [
             "name": "get_content",
-            "description": "Get the current page URL, title, selected text, and extracted readable text content.",
+            "description": "Get the current page URL, title, selected text, extracted readable text content, and a compact list of interactive elements. Prefer observe_page when you need element refs; use this when you need text for summarization.",
             "input_schema": [
                 "type": "object",
                 "properties": [:]
@@ -237,9 +317,11 @@ final class OpenClickyBrowserAgentRunner {
     private static let systemPrompt = """
     You are OpenClicky's Browser CUA (Computer Use Agent). You drive the active
     tab of OpenClicky's built-in browser to achieve the user's goal. You can
-    see the page via screenshots, read text via `get_content`, and act via
-    `click`, `type`, `press_key`, `scroll`, `wait_for`, `navigate`, `click_at`,
-    and `evaluate`.
+    inspect the page via `observe_page`, see the page via screenshots, read
+    text via `get_content`, control Browser Workspace tabs via `list_tabs`,
+    `new_tab`, `switch_tab`, and `close_tab`, and act via `click`, `type`,
+    `press_key`, `scroll`, `wait_for`, `navigate`, `browser_back`,
+    `browser_forward`, `browser_reload`, `click_at`, and `evaluate`.
 
     PLANNING DISCIPLINE
     1. On your VERY FIRST assistant turn, before calling any tool, emit a short
@@ -253,12 +335,15 @@ final class OpenClickyBrowserAgentRunner {
     3. After tool results come back, decide: continue, revise the plan, or
        finish. If you revise, emit "Plan update:" and the new numbered list.
     4. Prefer selector-based tools (`click`, `type`) with CSS / `text=...` /
-       `contains(...)` / `xpath=...`. Use `click_at` only when selectors fail.
+       `contains(...)` / `xpath=...` / `ref=...` from `observe_page`. Use
+       `click_at` only when selectors fail.
     5. After navigation or any action that changes the view, call `screenshot`
-       to re-orient before acting.
-    6. When the goal is fully achieved, call the `done` tool exactly once with
+       or `observe_page` to re-orient before acting.
+    6. For multi-site work, keep separate sites in separate Browser Workspace
+       tabs. Use `list_tabs` before switching or closing tabs.
+    7. When the goal is fully achieved, call the `done` tool exactly once with
        a concise summary. Do not emit further tool calls after `done`.
-    7. If you hit a hard block (login wall, captcha, missing data), call `done`
+    8. If you hit a hard block (login wall, captcha, missing data), call `done`
        with an honest summary explaining the block.
 
     SAFETY
@@ -316,11 +401,7 @@ final class OpenClickyBrowserAgentRunner {
         var userContentBlocks: [[String: Any]] = []
         var pageMeta = "No active page loaded yet."
         if let tabDetails = await getTabContentDetails() {
-            pageMeta = "Current Tab URL: \(tabDetails["url"] as? String ?? "none")\n" +
-                       "Page Title: \(tabDetails["title"] as? String ?? "Untitled")"
-            if let selection = tabDetails["selection"] as? String, !selection.isEmpty {
-                pageMeta += "\nSelected text: \(selection)"
-            }
+            pageMeta = Self.pageObservationSummary(from: tabDetails, includeReadableText: false)
         }
         userContentBlocks.append(["type": "text", "text": "Page metadata:\n\(pageMeta)"])
         if let screenshotData = await captureTabScreenshot() {
@@ -505,6 +586,30 @@ final class OpenClickyBrowserAgentRunner {
                 return .failure(summary: "Missing required parameter: url")
             }
             return await executeNavigate(url: url)
+
+        case "list_tabs":
+            return await executeListTabs()
+
+        case "new_tab":
+            return await executeNewTab(url: input["url"] as? String)
+
+        case "switch_tab":
+            guard let index = Self.intValue(input["index"]) else {
+                return .failure(summary: "Missing required parameter: index")
+            }
+            return await executeSwitchTab(index: index)
+
+        case "close_tab":
+            return await executeCloseTab(index: Self.intValue(input["index"]))
+
+        case "browser_back":
+            return await executeBrowserHistoryAction(.back)
+
+        case "browser_forward":
+            return await executeBrowserHistoryAction(.forward)
+
+        case "browser_reload":
+            return await executeBrowserHistoryAction(.reload)
             
         case "screenshot":
             if let screenshotData = await captureTabScreenshot() {
@@ -512,6 +617,9 @@ final class OpenClickyBrowserAgentRunner {
             } else {
                 return .failure(summary: "Failed to capture page screenshot.")
             }
+
+        case "observe_page":
+            return await runInjectedJSAction(kind: "observe_page", selector: nil, value: nil)
             
         case "click":
             guard let selector = input["selector"] as? String else {
@@ -545,8 +653,12 @@ final class OpenClickyBrowserAgentRunner {
             }
             let amount = input["amount"] as? Double
             let selector = input["selector"] as? String
-            let val = amount != nil ? "\(amount!)" : direction
-            return await runInjectedJSAction(kind: "scroll", selector: selector, value: val)
+            var payload: [String: Any] = ["direction": direction]
+            if let amount {
+                payload["amount"] = amount
+            }
+            let value = Self.jsonString(payload) ?? direction
+            return await runInjectedJSAction(kind: "scroll", selector: selector, value: value)
             
         case "wait_for":
             let selector = input["selector"] as? String
@@ -570,6 +682,61 @@ final class OpenClickyBrowserAgentRunner {
     }
 
     // MARK: - Specific Tool Handlers
+
+    private enum BrowserHistoryAction {
+        case back
+        case forward
+        case reload
+    }
+
+    private func executeListTabs() async -> ToolResult {
+        guard let model = browserModel else {
+            return .failure(summary: "Browser workspace is not available.")
+        }
+        let tabs = model.browserAgentTabSnapshot()
+        return .success(summary: Self.tabSnapshotSummary(tabs))
+    }
+
+    private func executeNewTab(url: String?) async -> ToolResult {
+        guard let model = browserModel else {
+            return .failure(summary: "Browser workspace is not available.")
+        }
+        let result = model.browserAgentOpenTab(url: url)
+        return result.success ? .success(summary: result.summary) : .failure(summary: result.summary)
+    }
+
+    private func executeSwitchTab(index: Int) async -> ToolResult {
+        guard let model = browserModel else {
+            return .failure(summary: "Browser workspace is not available.")
+        }
+        let result = model.browserAgentSwitchTab(index: index)
+        return result.success ? .success(summary: result.summary) : .failure(summary: result.summary)
+    }
+
+    private func executeCloseTab(index: Int?) async -> ToolResult {
+        guard let model = browserModel else {
+            return .failure(summary: "Browser workspace is not available.")
+        }
+        let result = model.browserAgentCloseTab(index: index)
+        return result.success ? .success(summary: result.summary) : .failure(summary: result.summary)
+    }
+
+    private func executeBrowserHistoryAction(_ action: BrowserHistoryAction) async -> ToolResult {
+        guard let model = browserModel else {
+            return .failure(summary: "Browser workspace is not available.")
+        }
+
+        let result: (success: Bool, summary: String)
+        switch action {
+        case .back:
+            result = model.browserAgentGoBack()
+        case .forward:
+            result = model.browserAgentGoForward()
+        case .reload:
+            result = model.browserAgentReload()
+        }
+        return result.success ? .success(summary: result.summary) : .failure(summary: result.summary)
+    }
     
     private func executeNavigate(url: String) async -> ToolResult {
         let lower = url.lowercased()
@@ -588,9 +755,16 @@ final class OpenClickyBrowserAgentRunner {
             _ = self.browserModel?.loadAddress(targetURL.absoluteString)
         }
         
-        // Wait a second for navigation to initiate
-        try? await Task.sleep(nanoseconds: 1_200_000_000)
-        return .success(summary: "Successfully initiated navigation to \(targetURL.absoluteString).")
+        try? await Task.sleep(nanoseconds: 300_000_000)
+        let start = Date()
+        while Date().timeIntervalSince(start) < 8 {
+            if let state = await evaluateRawJS("document.readyState") as? String,
+               state == "interactive" || state == "complete" {
+                return .success(summary: "Loaded \(targetURL.absoluteString) with document.readyState=\(state).")
+            }
+            try? await Task.sleep(nanoseconds: 250_000_000)
+        }
+        return .success(summary: "Initiated navigation to \(targetURL.absoluteString); page is still loading.")
     }
 
     private func executeWaitFor(selector: String?, text: String?, timeoutMs: Double) async -> ToolResult {
@@ -604,13 +778,13 @@ final class OpenClickyBrowserAgentRunner {
         
         while Date().timeIntervalSince(start) < limit {
             if let sel = selector {
-                let js = "document.querySelector(\(escapeJSString(sel))) !== null"
-                if let exists = await evaluateRawJS(js) as? Bool, exists {
+                let result = await runInjectedJSAction(kind: "query", selector: sel, value: nil)
+                if result.success {
                     return .success(summary: "Element matching '\(sel)' appeared on the page.")
                 }
             } else if let txt = text {
-                let js = "document.body.innerText.toLowerCase().includes(\(escapeJSString(txt.lowercased())))"
-                if let exists = await evaluateRawJS(js) as? Bool, exists {
+                let result = await runInjectedJSAction(kind: "query", selector: "text=\(txt)", value: nil)
+                if result.success {
                     return .success(summary: "Text '\(txt)' appeared on the page.")
                 }
             }
@@ -648,11 +822,8 @@ final class OpenClickyBrowserAgentRunner {
             let summary = dict["summary"] as? String ?? dict["error"] as? String ?? "Done."
             
             if success {
-                // If it is get_content, summarize the content
-                if kind == "get_content" {
-                    let pageTitle = dict["title"] as? String ?? "Untitled"
-                    let pageURL = dict["url"] as? String ?? "none"
-                    return .success(summary: "Extracted content for tab: '\(pageTitle)' (\(pageURL)).")
+                if kind == "get_content" || kind == "observe_page" {
+                    return .success(summary: Self.pageObservationSummary(from: dict, includeReadableText: kind == "get_content"))
                 }
                 return .success(summary: summary)
             } else {
@@ -789,11 +960,119 @@ final class OpenClickyBrowserAgentRunner {
     }
 
     private func escapeJSString(_ value: String) -> String {
-        guard let data = try? JSONSerialization.data(withJSONObject: value),
+        guard let data = try? JSONSerialization.data(withJSONObject: value, options: [.fragmentsAllowed]),
               let json = String(data: data, encoding: .utf8) else {
             return "\"\""
         }
         return json
+    }
+
+    private static func jsonString(_ value: [String: Any]) -> String? {
+        guard let data = try? JSONSerialization.data(withJSONObject: value, options: []),
+              let json = String(data: data, encoding: .utf8) else {
+            return nil
+        }
+        return json
+    }
+
+    private static func intValue(_ value: Any?) -> Int? {
+        if let value = value as? Int { return value }
+        if let value = value as? Double { return Int(value.rounded()) }
+        if let value = value as? NSNumber { return value.intValue }
+        if let value = value as? String { return Int(value.trimmingCharacters(in: .whitespacesAndNewlines)) }
+        return nil
+    }
+
+    private static func tabSnapshotSummary(_ tabs: [[String: Any]]) -> String {
+        guard !tabs.isEmpty else { return "No Browser Workspace tabs are open." }
+        let lines = tabs.map { tab in
+            let index = Self.numberString(tab["index"])
+            let active = (tab["isActive"] as? Bool) == true ? "active" : "inactive"
+            let title = Self.truncate(tab["title"] as? String ?? "Untitled", limit: 120)
+            let url = tab["url"] as? String ?? "open-clicky://welcome"
+            let back = (tab["canGoBack"] as? Bool) == true ? "back" : "no-back"
+            let forward = (tab["canGoForward"] as? Bool) == true ? "forward" : "no-forward"
+            return "\(index). \(active) \(title) — \(url) (\(back), \(forward))"
+        }
+        return "Browser tabs:\n" + lines.joined(separator: "\n")
+    }
+
+    private static func pageObservationSummary(from dict: [String: Any], includeReadableText: Bool) -> String {
+        let title = dict["title"] as? String ?? "Untitled"
+        let url = dict["url"] as? String ?? "none"
+        let selection = (dict["selection"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let readableText = (dict["readableText"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let headings = dict["headings"] as? [[String: Any]] ?? []
+        let elements = dict["interactiveElements"] as? [[String: Any]] ?? []
+        let viewport = dict["viewport"] as? [String: Any] ?? [:]
+        let scroll = dict["scroll"] as? [String: Any] ?? [:]
+
+        var lines: [String] = [
+            "Page: \(title)",
+            "URL: \(url)"
+        ]
+        if !viewport.isEmpty {
+            lines.append("Viewport: \(Self.numberString(viewport["width"]))x\(Self.numberString(viewport["height"])); scroll x=\(Self.numberString(scroll["x"])) y=\(Self.numberString(scroll["y"]))")
+        }
+        if !selection.isEmpty {
+            lines.append("Selected text: \(Self.truncate(selection, limit: 1200))")
+        }
+        if !headings.isEmpty {
+            let headingLines = headings.prefix(18).compactMap { heading -> String? in
+                guard let text = heading["text"] as? String, !text.isEmpty else { return nil }
+                let level = heading["level"] as? Int ?? 0
+                return "h\(level): \(Self.truncate(text, limit: 140))"
+            }
+            if !headingLines.isEmpty {
+                lines.append("Headings:\n" + headingLines.joined(separator: "\n"))
+            }
+        }
+        if !elements.isEmpty {
+            let elementLines = elements.prefix(80).compactMap(Self.elementSummaryLine)
+            if !elementLines.isEmpty {
+                lines.append("Interactive elements (use ref=N as selector):\n" + elementLines.joined(separator: "\n"))
+            }
+        }
+        if includeReadableText {
+            lines.append("Readable text:\n\(Self.truncate(readableText, limit: 16000))")
+        } else if !readableText.isEmpty {
+            lines.append("Readable text preview:\n\(Self.truncate(readableText, limit: 2500))")
+        }
+        return lines.joined(separator: "\n\n")
+    }
+
+    private static func elementSummaryLine(_ element: [String: Any]) -> String? {
+        let refValue: Int
+        if let ref = element["ref"] as? Int {
+            refValue = ref
+        } else if let ref = element["ref"] as? NSNumber {
+            refValue = ref.intValue
+        } else {
+            return nil
+        }
+        let tag = element["tag"] as? String ?? "element"
+        let role = element["role"] as? String ?? ""
+        let type = element["type"] as? String ?? ""
+        let name = truncate(element["name"] as? String ?? "", limit: 120)
+        let selector = element["selector"] as? String ?? ""
+        let rect = element["rect"] as? [String: Any] ?? [:]
+        let rectText = "x:\(numberString(rect["x"])) y:\(numberString(rect["y"])) w:\(numberString(rect["width"])) h:\(numberString(rect["height"]))"
+        let roleText = [role, type].filter { !$0.isEmpty }.joined(separator: "/")
+        let nameText = name.isEmpty ? "(no label)" : "\"\(name)\""
+        return "[ref=\(refValue)] \(tag)\(roleText.isEmpty ? "" : " \(roleText)") \(nameText) \(rectText)\(selector.isEmpty ? "" : " selector=\(selector)")"
+    }
+
+    private static func numberString(_ value: Any?) -> String {
+        if let value = value as? Int { return "\(value)" }
+        if let value = value as? Double { return "\(Int(value.rounded()))" }
+        if let value = value as? CGFloat { return "\(Int(value.rounded()))" }
+        if let value = value as? NSNumber { return "\(Int(value.doubleValue.rounded()))" }
+        return "0"
+    }
+
+    private static func truncate(_ value: String, limit: Int) -> String {
+        guard value.count > limit else { return value }
+        return String(value.prefix(limit)) + "..."
     }
 
     private func runWithAgentSDK(prompt: String, priorTurns: [PriorTurn] = []) async {
@@ -811,11 +1090,7 @@ final class OpenClickyBrowserAgentRunner {
         var pageMeta = "No active page loaded yet."
         let tabContent = await getTabContentDetails()
         if let tabDetails = tabContent {
-            pageMeta = "Current Tab URL: \(tabDetails["url"] as? String ?? "none")\n" +
-                       "Page Title: \(tabDetails["title"] as? String ?? "Untitled")"
-            if let selection = tabDetails["selection"] as? String, !selection.isEmpty {
-                pageMeta += "\nSelected text: \(selection)"
-            }
+            pageMeta = Self.pageObservationSummary(from: tabDetails, includeReadableText: false)
         }
 
         let initialUserPrompt = "Goal: \(prompt)\n\nPage metadata:\n\(pageMeta)"
@@ -968,6 +1243,10 @@ private enum CuaInjectedScriptGenerator {
             if (lower.startsWith('xpath=')) {
               return { kind: 'xpath', xpath: trimmed.slice(6).trim() };
             }
+            const refMatch = /^ref\\s*=\\s*(\\d+)$/i.exec(trimmed);
+            if (refMatch) {
+              return { kind: 'ref', ref: Number(refMatch[1]) };
+            }
             const textMatch = /^text\\s*=\\s*(.+)$/i.exec(trimmed);
             if (textMatch) {
               return { kind: 'text', text: stripQuotes(textMatch[1]).trim() };
@@ -1007,6 +1286,172 @@ private enum CuaInjectedScriptGenerator {
             if (style.display === 'none' || style.visibility === 'hidden') return false;
             if (parseFloat(style.opacity || '1') === 0) return false;
             return true;
+          };
+
+          const normalizeText = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
+          const cssEscape = (value) => {
+            if (window.CSS && typeof window.CSS.escape === 'function') return CSS.escape(value);
+            return String(value).replace(/[^a-zA-Z0-9_-]/g, '\\\\$&');
+          };
+
+          const selectorFor = (el) => {
+            if (!el || !el.tagName) return '';
+            if (el.id) return '#' + cssEscape(el.id);
+            const testID = el.getAttribute('data-testid') || el.getAttribute('data-test') || el.getAttribute('data-qa');
+            if (testID) return `${el.tagName.toLowerCase()}[data-testid="${String(testID).replace(/"/g, '\\"')}"]`;
+            const name = el.getAttribute('name');
+            if (name) return `${el.tagName.toLowerCase()}[name="${String(name).replace(/"/g, '\\"')}"]`;
+            const aria = el.getAttribute('aria-label');
+            if (aria) return `${el.tagName.toLowerCase()}[aria-label="${String(aria).replace(/"/g, '\\"')}"]`;
+
+            const parts = [];
+            let node = el;
+            while (node && node.nodeType === 1 && parts.length < 5) {
+              let part = node.tagName.toLowerCase();
+              const cls = Array.from(node.classList || []).filter(Boolean).slice(0, 2).map(c => '.' + cssEscape(c)).join('');
+              part += cls;
+              const parent = node.parentElement;
+              if (parent) {
+                const siblings = Array.from(parent.children).filter(child => child.tagName === node.tagName);
+                if (siblings.length > 1) part += `:nth-of-type(${siblings.indexOf(node) + 1})`;
+              }
+              parts.unshift(part);
+              node = parent;
+            }
+            return parts.join(' > ');
+          };
+
+          const associatedLabelText = (el) => {
+            const parts = [];
+            if (el && el.labels) {
+              for (const label of Array.from(el.labels)) parts.push(label.innerText || label.textContent || '');
+            }
+            if (el && el.id) {
+              const escapedID = cssEscape(el.id);
+              for (const label of Array.from(document.querySelectorAll(`label[for="${escapedID}"]`))) {
+                parts.push(label.innerText || label.textContent || '');
+              }
+            }
+            const wrappingLabel = el?.closest?.('label');
+            if (wrappingLabel) parts.push(wrappingLabel.innerText || wrappingLabel.textContent || '');
+            return normalizeText(parts.join(' '));
+          };
+
+          const accessibleName = (el) => {
+            if (!el) return '';
+            const labelledBy = el.getAttribute?.('aria-labelledby');
+            const labelledByText = labelledBy ? labelledBy.split(/\\s+/).map(id => document.getElementById(id)?.innerText || '').join(' ') : '';
+            const parts = [
+              labelledByText,
+              el.getAttribute?.('aria-label'),
+              el.getAttribute?.('alt'),
+              el.getAttribute?.('title'),
+              el.getAttribute?.('placeholder'),
+              associatedLabelText(el),
+              el.innerText,
+              el.textContent,
+              el.value,
+              el.getAttribute?.('name'),
+              el.id
+            ];
+            return normalizeText(parts.filter(Boolean).join(' '));
+          };
+
+          const allElementsDeep = (root = document, maxNodes = 25000) => {
+            const out = [];
+            const stack = [root];
+            let visited = 0;
+            while (stack.length && visited < maxNodes) {
+              const node = stack.pop();
+              if (!node) continue;
+              if (node instanceof Element) {
+                visited += 1;
+                out.push(node);
+                if (node.shadowRoot) stack.push(node.shadowRoot);
+                for (const child of Array.from(node.children)) stack.push(child);
+              } else {
+                const children = node instanceof Document ? [node.documentElement] : Array.from(node.children || []);
+                for (const child of children) if (child) stack.push(child);
+              }
+            }
+            return out;
+          };
+
+          const interactiveSelector = 'a[href], button, input, textarea, select, option, summary, details, [contenteditable="true"], [contenteditable=""], [role="button"], [role="link"], [role="textbox"], [role="searchbox"], [role="combobox"], [role="checkbox"], [role="radio"], [role="menuitem"], [tabindex]:not([tabindex="-1"]), [aria-label], [title]';
+          const interactiveElements = () => {
+            const seen = new Set();
+            const out = [];
+            for (const el of allElementsDeep()) {
+              if (!(el instanceof HTMLElement)) continue;
+              if (seen.has(el)) continue;
+              seen.add(el);
+              try {
+                if (!el.matches(interactiveSelector)) continue;
+              } catch {
+                continue;
+              }
+              if (!isVisible(el)) continue;
+              out.push(el);
+              if (out.length >= 160) break;
+            }
+            return out;
+          };
+
+          const refElement = (raw) => {
+            const match = /^ref\\s*=\\s*(\\d+)$/i.exec(String(raw || '').trim());
+            if (!match) return null;
+            const index = Number(match[1]);
+            return interactiveElements()[index - 1] || null;
+          };
+
+          const elementSummary = (el, index) => {
+            const rect = el.getBoundingClientRect();
+            const href = el.href || el.getAttribute('href') || '';
+            return {
+              ref: index + 1,
+              tag: el.tagName.toLowerCase(),
+              role: el.getAttribute('role') || '',
+              type: el.getAttribute('type') || '',
+              name: accessibleName(el).slice(0, 220),
+              value: String(el.value || '').slice(0, 160),
+              href: String(href || '').slice(0, 320),
+              selector: selectorFor(el),
+              rect: {
+                x: Math.round(rect.left),
+                y: Math.round(rect.top),
+                width: Math.round(rect.width),
+                height: Math.round(rect.height)
+              }
+            };
+          };
+
+          const pageSnapshot = () => {
+            const readableText = normalizeText(document.body ? document.body.innerText : '');
+            const selection = normalizeText(window.getSelection ? window.getSelection().toString() : '');
+            const headingNodes = Array.from(document.querySelectorAll('h1,h2,h3,h4,h5,h6')).filter(isVisible).slice(0, 30);
+            return {
+              success: true,
+              url: window.location.href,
+              title: document.title || '',
+              selection,
+              readableText: readableText.slice(0, 24000),
+              readableTextLength: readableText.length,
+              viewport: {
+                width: Math.round(window.innerWidth || 0),
+                height: Math.round(window.innerHeight || 0)
+              },
+              scroll: {
+                x: Math.round(window.scrollX || 0),
+                y: Math.round(window.scrollY || 0),
+                maxY: Math.round(Math.max(0, (document.documentElement?.scrollHeight || 0) - (window.innerHeight || 0)))
+              },
+              headings: headingNodes.map(node => ({
+                level: Number(node.tagName.slice(1)),
+                text: normalizeText(node.innerText || node.textContent || '').slice(0, 240)
+              })),
+              interactiveElements: interactiveElements().slice(0, 120).map(elementSummary),
+              summary: `Observed ${interactiveElements().length} visible interactive elements and ${readableText.length} readable characters.`
+            };
           };
 
           const deepQuerySelectorAll = (css, maxNodes = 25000) => {
@@ -1053,8 +1498,19 @@ private enum CuaInjectedScriptGenerator {
             } else {
               preferred = Array.from(document.querySelectorAll('a, button, input, [role="button"], [role="link"], summary'));
             }
+
+            if (allowDeepSearch) {
+              const merged = [];
+              const seenPreferred = new Set();
+              for (const el of preferred.concat(interactiveElements())) {
+                if (seenPreferred.has(el)) continue;
+                seenPreferred.add(el);
+                merged.push(el);
+              }
+              preferred = merged;
+            }
             
-            const pool = preferred.length > 0 ? preferred : Array.from(document.querySelectorAll('body *'));
+            const pool = preferred.length > 0 ? preferred : allElementsDeep();
             let best = null;
             let bestScore = -1;
             let seen = 0;
@@ -1062,7 +1518,7 @@ private enum CuaInjectedScriptGenerator {
             for (const el of pool) {
               if (!(el instanceof HTMLElement)) continue;
               if (!isVisible(el)) continue;
-              const txt = String(el.innerText || el.textContent || '').replace(/\\s+/g, ' ').trim().toLowerCase();
+              const txt = accessibleName(el).toLowerCase();
               if (!txt) continue;
               if (!txt.includes(wanted)) continue;
               seen += 1;
@@ -1083,6 +1539,11 @@ private enum CuaInjectedScriptGenerator {
 
           const resolveElement = (spec, allowDeepSearch) => {
             if (!spec) return { el: null, strategy: 'none', candidates: 0, error: 'Missing selector.' };
+
+            if (spec.kind === 'ref') {
+              const el = refElement(`ref=${spec.ref}`);
+              return el ? { el, strategy: 'ref', candidates: 1 } : { el: null, strategy: 'ref', candidates: 0, error: 'Element ref not found. Call observe_page again for current refs.' };
+            }
             
             if (spec.kind === 'xpath') {
               const expr = String(spec.xpath || '').trim();
@@ -1160,10 +1621,10 @@ private enum CuaInjectedScriptGenerator {
             
             const resolveEditable = (candidate) => {
               if (!candidate) return null;
-              if (candidate instanceof HTMLInputElement || candidate instanceof HTMLTextAreaElement || candidate.isContentEditable) {
+              if (candidate instanceof HTMLInputElement || candidate instanceof HTMLTextAreaElement || candidate.isContentEditable || ['textbox', 'searchbox', 'combobox'].includes(candidate.getAttribute?.('role'))) {
                 return candidate;
               }
-              return candidate.querySelector('textarea, input, [contenteditable="true"], [contenteditable=""], [role="textbox"]');
+              return candidate.querySelector('textarea, input, [contenteditable="true"], [contenteditable=""], [role="textbox"], [role="searchbox"], [role="combobox"]');
             };
             
             const editable = resolveEditable(el);
@@ -1199,7 +1660,7 @@ private enum CuaInjectedScriptGenerator {
               return { success: true };
             }
             
-            if (editable.isContentEditable) {
+            if (editable.isContentEditable || ['textbox', 'searchbox', 'combobox'].includes(editable.getAttribute?.('role'))) {
               const selection = window.getSelection();
               if (selection) {
                 selection.removeAllRanges();
@@ -1219,16 +1680,17 @@ private enum CuaInjectedScriptGenerator {
           };
 
           try {
-            if (actionKind === 'get_content') {
-              const visibleText = document.body ? document.body.innerText : '';
-              const selection = window.getSelection() ? window.getSelection().toString() : '';
-              return {
-                success: true,
-                url: window.location.href,
-                title: document.title,
-                selection: selection,
-                readableText: visibleText.slice(0, 10000)
-              };
+            if (actionKind === 'get_content' || actionKind === 'observe_page') {
+              return pageSnapshot();
+            }
+
+            if (actionKind === 'query') {
+              const spec = parseSelectorSpec(specRaw);
+              const res = resolveElement(spec, true);
+              if (res.el) {
+                return { success: true, summary: `Found element via ${res.strategy}.`, strategy: res.strategy, candidates: res.candidates };
+              }
+              return { success: false, error: res.error || 'Element not found.', strategy: res.strategy, candidates: res.candidates };
             }
             
             if (actionKind === 'scroll') {
@@ -1239,13 +1701,24 @@ private enum CuaInjectedScriptGenerator {
                 if (res.el) scrollTarget = res.el;
               }
               
-              const amt = value ? parseFloat(value) : window.innerHeight / 2;
+              let direction = 'down';
+              let amt = window.innerHeight / 2;
+              if (value) {
+                try {
+                  const parsed = JSON.parse(value);
+                  direction = String(parsed.direction || 'down').toLowerCase();
+                  if (Number.isFinite(Number(parsed.amount))) amt = Number(parsed.amount);
+                } catch {
+                  direction = String(value || 'down').toLowerCase();
+                  const numeric = Number(value);
+                  if (Number.isFinite(numeric)) amt = numeric;
+                }
+              }
               let dx = 0, dy = 0;
-              const dir = String(value || 'down').toLowerCase();
-              if (dir === 'up') dy = -amt;
-              else if (dir === 'down') dy = amt;
-              else if (dir === 'left') dx = -amt;
-              else if (dir === 'right') dx = amt;
+              if (direction === 'up') dy = -amt;
+              else if (direction === 'down') dy = amt;
+              else if (direction === 'left') dx = -amt;
+              else if (direction === 'right') dx = amt;
               
               if (scrollTarget === window) {
                 window.scrollBy({ left: dx, top: dy, behavior: 'instant' });
@@ -1253,7 +1726,7 @@ private enum CuaInjectedScriptGenerator {
                 scrollTarget.scrollLeft += dx;
                 scrollTarget.scrollTop += dy;
               }
-              return { success: true, summary: `Scrolled ${dir} by ${amt}px.` };
+              return { success: true, summary: `Scrolled ${direction} by ${amt}px.` };
             }
             
             if (actionKind === 'press_key') {
@@ -1264,13 +1737,46 @@ private enum CuaInjectedScriptGenerator {
                 if (res.el) target = res.el;
               }
               const key = String(value || 'Enter');
+              try { target.focus?.({ preventScroll: true }); } catch(e){}
+              const codeMap = {
+                Enter: 'Enter',
+                Tab: 'Tab',
+                Escape: 'Escape',
+                ArrowDown: 'ArrowDown',
+                ArrowUp: 'ArrowUp',
+                ArrowLeft: 'ArrowLeft',
+                ArrowRight: 'ArrowRight',
+                Backspace: 'Backspace',
+                Delete: 'Delete'
+              };
+              const code = codeMap[key] || key;
               const fireKey = (type) => {
-                const ev = new KeyboardEvent(type, { key: key, code: key, bubbles: true, cancelable: true });
+                const ev = new KeyboardEvent(type, { key: key, code: code, bubbles: true, cancelable: true });
                 target.dispatchEvent(ev);
               };
               fireKey('keydown');
               fireKey('keypress');
               fireKey('keyup');
+              if (key === 'Tab') {
+                const focusables = interactiveElements().filter(el => typeof el.focus === 'function');
+                const currentIndex = focusables.indexOf(target);
+                const next = focusables[(currentIndex + 1 + focusables.length) % Math.max(1, focusables.length)];
+                if (next) {
+                  next.focus({ preventScroll: false });
+                  return { success: true, summary: `Pressed Tab and focused ${accessibleName(next).slice(0, 80) || next.tagName}.` };
+                }
+              }
+              if (key === 'Enter') {
+                const form = target.closest?.('form');
+                if (form) {
+                  if (typeof form.requestSubmit === 'function') {
+                    form.requestSubmit();
+                    return { success: true, summary: `Pressed Enter and submitted the focused form.` };
+                  }
+                  form.submit?.();
+                  return { success: true, summary: `Pressed Enter and submitted the focused form.` };
+                }
+              }
               return { success: true, summary: `Pressed key '${key}' on target.` };
             }
             
@@ -1303,13 +1809,13 @@ private enum CuaInjectedScriptGenerator {
             
             if (actionKind === 'click') {
               const clickRes = doClick(res.el);
-              const name = res.el.innerText || res.el.value || res.el.getAttribute('aria-label') || res.el.id || res.el.tagName;
+              const name = accessibleName(res.el) || res.el.tagName;
               return { ...clickRes, summary: `Successfully clicked element: "${name.substring(0, 30).trim()}"` };
             }
             
             if (actionKind === 'type') {
               const typeRes = doType(res.el, value);
-              const name = res.el.placeholder || res.el.name || res.el.id || res.el.tagName;
+              const name = accessibleName(res.el) || res.el.placeholder || res.el.name || res.el.id || res.el.tagName;
               return { ...typeRes, summary: typeRes.success ? `Typed content into: "${name.substring(0, 30).trim()}"` : typeRes.error };
             }
             
@@ -1322,7 +1828,7 @@ private enum CuaInjectedScriptGenerator {
     }
 
     private static func escapeJSString(_ value: String) -> String {
-        guard let data = try? JSONSerialization.data(withJSONObject: value),
+        guard let data = try? JSONSerialization.data(withJSONObject: value, options: [.fragmentsAllowed]),
               let json = String(data: data, encoding: .utf8) else {
             return "\"\""
         }
