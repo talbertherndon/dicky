@@ -11,6 +11,7 @@ struct ClickyCodexConfigTemplate: Equatable {
     var bundledSkillsDirectoryName: String
     var learnedSkillsDirectoryName: String
     var includeOpenAIDeveloperDocsMCP: Bool
+    var includeComposioConnectMCP: Bool
     var cuaDriverMCPCommand: String?
 
     init(
@@ -21,6 +22,7 @@ struct ClickyCodexConfigTemplate: Equatable {
         bundledSkillsDirectoryName: String = "OpenClickyBundledSkills",
         learnedSkillsDirectoryName: String = "OpenClickyLearnedSkills",
         includeOpenAIDeveloperDocsMCP: Bool = false,
+        includeComposioConnectMCP: Bool = true,
         cuaDriverMCPCommand: String? = nil
     ) {
         self.model = model
@@ -30,6 +32,7 @@ struct ClickyCodexConfigTemplate: Equatable {
         self.bundledSkillsDirectoryName = bundledSkillsDirectoryName
         self.learnedSkillsDirectoryName = learnedSkillsDirectoryName
         self.includeOpenAIDeveloperDocsMCP = includeOpenAIDeveloperDocsMCP
+        self.includeComposioConnectMCP = includeComposioConnectMCP
         self.cuaDriverMCPCommand = cuaDriverMCPCommand
     }
 
@@ -80,6 +83,14 @@ struct ClickyCodexConfigTemplate: Equatable {
                 "",
                 "[mcp_servers.openaiDeveloperDocs]",
                 "url = \"https://developers.openai.com/mcp\""
+            ])
+        }
+
+        if includeComposioConnectMCP {
+            lines.append(contentsOf: [
+                "",
+                "[mcp_servers.composio]",
+                "url = \"https://connect.composio.dev/mcp\""
             ])
         }
 

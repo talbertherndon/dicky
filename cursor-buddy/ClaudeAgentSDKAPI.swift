@@ -51,7 +51,7 @@ final class ClaudeAgentSDKAPI {
     private var activeBridgeSystemPromptHash: Int?
 
     init?(
-        model: String = OpenClickyModelCatalog.defaultVoiceResponseModelID,
+        model: String = "claude-haiku-4-5",
         maxOutputTokens: Int = 64_000,
         fileManager: FileManager = .default,
         workingDirectory: URL? = nil

@@ -1333,6 +1333,16 @@ final class CodexAgentSession: ObservableObject, Identifiable, BrowserWorkspaceA
             return true
         }
 
+        if normalized.contains("rmcp::transport::worker")
+            && normalized.contains("worker quit with fatal")
+            && (
+                normalized.contains("authrequired")
+                || normalized.contains("no authorization: bearer header")
+                || normalized.contains("data did not match any variant of untagged enum jsonrpcmessage")
+            ) {
+            return true
+        }
+
         if normalized.contains("failed to load skill")
             && normalized.contains("invalid description")
             && normalized.contains("exceeds maximum length") {
@@ -1650,10 +1660,11 @@ final class CodexAgentSession: ObservableObject, Identifiable, BrowserWorkspaceA
         #endif
 
         if let anthropicAPIKey = AppBundleConfiguration.anthropicAPIKey() {
+            let fastAnthropicModel = "claude-haiku-4-5"
             do {
                 let api = ClaudeAPI(
                     apiKey: anthropicAPIKey,
-                    model: OpenClickyModelCatalog.defaultVoiceResponseModelID,
+                    model: fastAnthropicModel,
                     maxOutputTokens: 64
                 )
                 let (text, duration) = try await api.analyzeImage(
@@ -1668,7 +1679,7 @@ final class CodexAgentSession: ObservableObject, Identifiable, BrowserWorkspaceA
                         event: "openclicky.agent_task.title_generated",
                         fields: [
                             "provider": "anthropic",
-                            "model": OpenClickyModelCatalog.defaultVoiceResponseModelID,
+                            "model": fastAnthropicModel,
                             "durationMs": Int((duration * 1000).rounded()),
                             "title": title
                         ]
@@ -1682,7 +1693,7 @@ final class CodexAgentSession: ObservableObject, Identifiable, BrowserWorkspaceA
                     event: "openclicky.agent_task.title_generation_failed",
                     fields: [
                         "provider": "anthropic",
-                        "model": OpenClickyModelCatalog.defaultVoiceResponseModelID,
+                        "model": fastAnthropicModel,
                         "error": error.localizedDescription
                     ]
                 )

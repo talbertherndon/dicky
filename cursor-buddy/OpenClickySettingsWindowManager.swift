@@ -203,6 +203,7 @@ struct OpenClickySettingsView: View {
     @State private var userAssemblyAIAPIKey = ""
     @State private var userDeepgramAPIKey = ""
     @AppStorage(AppBundleConfiguration.userMCPDeveloperDocsEnabledDefaultsKey) private var mcpDeveloperDocsEnabled = false
+    @AppStorage(AppBundleConfiguration.userMCPComposioConnectEnabledDefaultsKey) private var mcpComposioConnectEnabled = true
     @AppStorage(AppBundleConfiguration.userMCPComputerUseEnabledDefaultsKey) private var mcpComputerUseEnabled = false
     @AppStorage(AppBundleConfiguration.userMCPCuaDriverCommandDefaultsKey) private var mcpCuaDriverCommand = CuaDriverMCPConfiguration.resolvedCommandPath() ?? ""
     @AppStorage(AppBundleConfiguration.userDesktopNotificationsEnabledDefaultsKey) private var desktopNotificationsEnabled = true
@@ -1353,6 +1354,19 @@ struct OpenClickySettingsView: View {
                         get: { mcpDeveloperDocsEnabled },
                         set: { newValue in
                             mcpDeveloperDocsEnabled = newValue
+                            syncCodexMCPSettings()
+                        }
+                    )
+                )
+
+                toggleRow(
+                    title: "Composio connected apps",
+                    subtitle: "Adds Composio Connect MCP for GitHub and other connected-app actions.",
+                    systemImageName: "link.badge.plus",
+                    isOn: Binding(
+                        get: { mcpComposioConnectEnabled },
+                        set: { newValue in
+                            mcpComposioConnectEnabled = newValue
                             syncCodexMCPSettings()
                         }
                     )

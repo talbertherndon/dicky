@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import Network
 
@@ -20,6 +21,7 @@ enum OpenClickyExternalControlCommand {
     case showCursors([OpenClickyExternalCursorSpec])
     case showCaption(text: String, point: CGPoint?, duration: TimeInterval, accentHex: String?)
     case captureScreenshot(focused: Bool)
+    case click(point: CGPoint, caption: String?)
     case clear
     case speak(text: String, interrupt: Bool)
     case notify(title: String, body: String, threadID: String?, sound: Bool)
@@ -160,7 +162,7 @@ final class OpenClickyExternalControlBridgeServer: @unchecked Sendable {
                 "transport": "local-http+sse",
                 "bridgeTokenRequired": true,
                 "bridgeTokenConfigured": AppBundleConfiguration.externalControlBridgeToken() != nil,
-                "tools": ["openclicky_point", "openclicky_point_many", "show_cursor", "show_cursors", "show_caption", "screenshot", "clear", "speak", "notify"],
+                "tools": ["openclicky_point", "openclicky_point_many", "openclicky_click", "show_cursor", "show_cursors", "show_caption", "screenshot", "click", "clear", "speak", "notify"],
                 "multiToolEndpoints": ["/mcp/calls", "/tools/calls"],
                 "inferenceProxyEnabled": AppBundleConfiguration.externalInferenceProxyEnabled()
             ]
@@ -217,6 +219,8 @@ final class OpenClickyExternalControlBridgeServer: @unchecked Sendable {
             command = Self.captionCommand(from: request.jsonBody)
         case "/screenshot", "/screenshots":
             command = .captureScreenshot(focused: Self.bool(request.jsonBody["focused"]) ?? false)
+        case "/click":
+            command = Self.clickCommand(from: request.jsonBody)
         case "/clear":
             command = .clear
         case "/speak":
@@ -518,6 +522,11 @@ final class OpenClickyExternalControlBridgeServer: @unchecked Sendable {
         )
     }
 
+    private static func clickCommand(from json: [String: Any]) -> OpenClickyExternalControlCommand? {
+        guard let point = point(from: json) else { return nil }
+        return .click(point: point, caption: string(json["caption"]) ?? string(json["label"]))
+    }
+
     private static func speakCommand(from json: [String: Any]) -> OpenClickyExternalControlCommand? {
         guard let text = string(json["text"]), !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
         return .speak(text: text, interrupt: bool(json["interrupt"]) ?? false)
@@ -611,12 +620,38 @@ final class OpenClickyExternalControlBridgeServer: @unchecked Sendable {
             ],
             [
                 "name": "screenshot",
-                "description": "Capture current screens to local JPEG files with frame metadata so the agent can locate UI and then show it.",
+                "description": "Capture current screens to local JPEG files with frame metadata so the agent can locate UI and then show or click it.",
                 "inputSchema": [
                     "type": "object",
                     "properties": [
                         "focused": ["type": "boolean"]
                     ]
+                ]
+            ],
+            [
+                "name": "openclicky_click",
+                "description": "Actually left-click a macOS screen coordinate using OpenClicky's native computer-use path. Coordinates are global AppKit screen points, the same coordinate space returned in screenshot displayFrame metadata.",
+                "inputSchema": [
+                    "type": "object",
+                    "properties": [
+                        "x": ["type": "number"],
+                        "y": ["type": "number"],
+                        "caption": ["type": "string"]
+                    ],
+                    "required": ["x", "y"]
+                ]
+            ],
+            [
+                "name": "click",
+                "description": "Alias for openclicky_click: actually left-click a macOS screen coordinate through OpenClicky.",
+                "inputSchema": [
+                    "type": "object",
+                    "properties": [
+                        "x": ["type": "number"],
+                        "y": ["type": "number"],
+                        "caption": ["type": "string"]
+                    ],
+                    "required": ["x", "y"]
                 ]
             ],
             [
@@ -665,6 +700,8 @@ final class OpenClickyExternalControlBridgeServer: @unchecked Sendable {
             return captionCommand(from: arguments)
         case "screenshot", "screenshots", "capture_screenshot", "openclicky_screenshot":
             return .captureScreenshot(focused: bool(arguments["focused"]) ?? false)
+        case "openclicky_click", "click", "left_click", "mouse_click":
+            return clickCommand(from: arguments)
         case "clear", "openclicky_clear":
             return .clear
         case "speak", "openclicky_speak":

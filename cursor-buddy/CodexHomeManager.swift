@@ -181,6 +181,7 @@ final class CodexHomeManager {
             bundledSkillsDirectoryName: bundledSkillsDirectoryName,
             learnedSkillsDirectoryName: learnedSkillsDirectoryName,
             includeOpenAIDeveloperDocsMCP: AppBundleConfiguration.mcpDeveloperDocsEnabled(),
+            includeComposioConnectMCP: AppBundleConfiguration.mcpComposioConnectEnabled(),
             cuaDriverMCPCommand: cuaDriverCommand
         )
         let configFile = codexHomeDirectory.appendingPathComponent("config.toml", isDirectory: false)

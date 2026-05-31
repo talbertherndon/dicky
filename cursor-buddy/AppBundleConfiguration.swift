@@ -46,6 +46,7 @@ nonisolated enum AppBundleConfiguration {
     static let userComputerUseBackendDefaultsKey = "openClickyComputerUseBackend"
     static let userNativeComputerUseDefaultsKey = "openClickyNativeComputerUseEnabled"
     static let userMCPDeveloperDocsEnabledDefaultsKey = "openClickyMCPDeveloperDocsEnabled"
+    static let userMCPComposioConnectEnabledDefaultsKey = "openClickyMCPComposioConnectEnabled"
     static let userMCPComputerUseEnabledDefaultsKey = "openClickyMCPComputerUseEnabled"
     static let userMCPCuaDriverCommandDefaultsKey = "openClickyMCPCuaDriverCommand"
     static let userExternalInferenceProxyEnabledDefaultsKey = "openClickyExternalInferenceProxyEnabled"
@@ -108,6 +109,10 @@ nonisolated enum AppBundleConfiguration {
 
     static func mcpDeveloperDocsEnabled() -> Bool {
         userDefaultsBool(forKey: userMCPDeveloperDocsEnabledDefaultsKey, defaultValue: false)
+    }
+
+    static func mcpComposioConnectEnabled() -> Bool {
+        userDefaultsBool(forKey: userMCPComposioConnectEnabledDefaultsKey, defaultValue: true)
     }
 
     static func mcpComputerUseEnabled() -> Bool {

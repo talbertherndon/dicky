@@ -314,35 +314,40 @@ final class BuddyDictationManager: NSObject, ObservableObject {
     func startPersistentDictationFromMicrophoneButton(
         currentDraftText: String,
         updateDraftText: @escaping (String) -> Void,
-        submitDraftText: @escaping (String) -> Void
+        submitDraftText: @escaping (String) -> Void,
+        onWillStartRecording: (() -> Void)? = nil
     ) async {
         await startPushToTalk(
             startSource: .microphoneButton,
             currentDraftText: currentDraftText,
             updateDraftText: updateDraftText,
             submitDraftText: submitDraftText,
-            shouldAutomaticallySubmitFinalDraftOnStop: false
+            shouldAutomaticallySubmitFinalDraftOnStop: false,
+            onWillStartRecording: onWillStartRecording
         )
     }
 
     func startAutoSubmittingDictationFromMicrophoneButton(
         currentDraftText: String,
         updateDraftText: @escaping (String) -> Void,
-        submitDraftText: @escaping (String) -> Void
+        submitDraftText: @escaping (String) -> Void,
+        onWillStartRecording: (() -> Void)? = nil
     ) async {
         await startPushToTalk(
             startSource: .microphoneButton,
             currentDraftText: currentDraftText,
             updateDraftText: updateDraftText,
             submitDraftText: submitDraftText,
-            shouldAutomaticallySubmitFinalDraftOnStop: true
+            shouldAutomaticallySubmitFinalDraftOnStop: true,
+            onWillStartRecording: onWillStartRecording
         )
     }
 
     func startPushToTalkFromKeyboardShortcut(
         currentDraftText: String,
         updateDraftText: @escaping (String) -> Void,
-        submitDraftText: @escaping (String) -> Void
+        submitDraftText: @escaping (String) -> Void,
+        onWillStartRecording: (() -> Void)? = nil
     ) async {
         await startPushToTalk(
             startSource: .keyboardShortcut,
@@ -351,7 +356,8 @@ final class BuddyDictationManager: NSObject, ObservableObject {
             submitDraftText: submitDraftText,
             shouldAutomaticallySubmitFinalDraftOnStop: currentDraftText
                 .trimmingCharacters(in: .whitespacesAndNewlines)
-                .isEmpty
+                .isEmpty,
+            onWillStartRecording: onWillStartRecording
         )
     }
 
@@ -411,7 +417,8 @@ final class BuddyDictationManager: NSObject, ObservableObject {
         currentDraftText: String,
         updateDraftText: @escaping (String) -> Void,
         submitDraftText: @escaping (String) -> Void,
-        shouldAutomaticallySubmitFinalDraftOnStop: Bool
+        shouldAutomaticallySubmitFinalDraftOnStop: Bool,
+        onWillStartRecording: (() -> Void)?
     ) async {
         guard !isDictationInProgress else {
             OpenClickyMessageLogStore.shared.append(
@@ -537,6 +544,8 @@ final class BuddyDictationManager: NSObject, ObservableObject {
             resetSessionState()
             return
         }
+
+        onWillStartRecording?()
 
         do {
             try await startRecognitionSession()

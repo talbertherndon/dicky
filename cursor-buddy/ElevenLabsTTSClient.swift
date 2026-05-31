@@ -599,13 +599,17 @@ final class StreamingTTSSession {
     private var scheduledFrameCount: AVAudioFramePosition = 0
     private(set) var isCancelled = false
     private var sentenceCount = 0
-    /// Sentence-by-sentence TTS fetches can complete just-in-time. If
-    /// the first buffer starts immediately, a later sentence that takes
-    /// a few hundred ms longer to synthesize creates an audible gap that
-    /// feels like stutter. Hold a small amount of queued PCM before
-    /// starting normal streamed speech; explicit pre-baked fillers still
-    /// play immediately because they exist to cover latency.
-    private static let minimumBufferedSecondsBeforePlayback: Double = 0.9
+    /// Sentence-by-sentence TTS fetches can complete just-in-time. Keep
+    /// only a tiny PCM cushion before starting normal streamed speech:
+    /// the voice path is supposed to start speaking as soon as the first
+    /// sentence is synthesised, not wait for most of the model response.
+    /// Explicit pre-baked fillers still play immediately because they
+    /// exist to cover latency.
+    private static let minimumBufferedSecondsBeforePlayback: Double = 0.25
+    /// Cached filler should not fire instantly. A short thinking beat makes
+    /// the exchange feel conversational, while still covering real model or
+    /// screenshot latency before the substantive follow-up arrives.
+    static let preResponseFillerDelayMilliseconds = 400
     /// Words required before we'll cut on a punctuation+space. Prevents
     /// "Mr." / "Dr." / "U.S." mid-name splits in normal prose.
     private static let minimumWordsPerSentence = 4
@@ -677,23 +681,24 @@ final class StreamingTTSSession {
 
     // MARK: - Sentence detection
 
-    /// Soft cap on words per TTS request. Sentences longer than this
-    /// are clause-split on commas / semicolons / em-dashes, because:
-    /// - Each TTS provider's stream truncation risk grows with audio
-    ///   length — a 5-second synthesis is more likely to EOF early
-    ///   than a 1.5-second one.
-    /// - Smaller per-clause requests parallelize better; the chain
-    ///   keeps audio queued ahead of playback even on slower turns.
-    fileprivate static let maxWordsPerTTSChunk = 25
+    /// Defensive hard cap on words per TTS request when no useful spoken
+    /// pause arrives. OpenClicky should prefer full stops / periods, then
+    /// comma-like pauses once a clause is getting long, rather than cutting
+    /// every short phrase on a fixed word count.
+    static let maxWordsPerTTSChunk = 32
+    /// Minimum words before a comma/colon/semicolon is treated as an
+    /// early spoken pause during streaming. This lets long sentences start
+    /// speaking naturally without chopping short asides.
+    private static let minimumWordsBeforePauseCut = 15
 
     private func flushCompleteSentences() {
-        while let cutEnd = nextSentenceCut(in: pendingText) {
+        while let cutEnd = Self.nextSentenceCut(in: pendingText) {
             let sentence = String(pendingText[..<cutEnd])
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             pendingText = String(pendingText[cutEnd...])
             guard sentence.count >= 2 else { continue }
 
-            // Long sentence — split on commas / semicolons / em-dashes
+            // Long sentence — split on commas / colons / semicolons / em-dashes
             // so individual TTS requests stay short.
             if Self.wordCount(sentence) > Self.maxWordsPerTTSChunk {
                 let clauses = Self.splitLongSentenceIntoClauses(sentence)
@@ -706,11 +711,11 @@ final class StreamingTTSSession {
         }
     }
 
-    fileprivate static func wordCount(_ text: String) -> Int {
+    static func wordCount(_ text: String) -> Int {
         text.split(whereSeparator: { !$0.isLetter && !$0.isNumber }).count
     }
 
-    /// Splits an over-long sentence into clauses on `,`, `;`, ` — `, ` -- `.
+    /// Splits an over-long sentence into clauses on `,`, `:`, `;`, ` — `, ` -- `.
     /// Each clause is ≤ `maxWordsPerTTSChunk` words; if a single
     /// clause-free run exceeds the cap we hard-split on space at the
     /// nearest word boundary so no single TTS request is ever multi-
@@ -731,9 +736,12 @@ final class StreamingTTSSession {
             let ch = sentence[index]
             buffer.append(ch)
 
-            // Clause break on comma / semicolon / em-dash sequence.
-            let isBreakChar = (ch == "," || ch == ";")
-            if isBreakChar && wordCount(buffer) >= 5 {
+            // Clause break on comma / colon / semicolon. Colon is common
+            // in OpenClicky's spoken diagnostic replies ("the fix was: ...")
+            // and was previously making the first TTS request wait for a
+            // much longer sentence tail.
+            let isBreakChar = (ch == "," || ch == ":" || ch == ";")
+            if isBreakChar && wordCount(buffer) >= minimumWordsBeforePauseCut {
                 flush()
             }
             index = sentence.index(after: index)
@@ -762,9 +770,34 @@ final class StreamingTTSSession {
         return safe
     }
 
+    static func testChunksForStreaming(_ text: String) -> [String] {
+        var remaining = text
+        var chunks: [String] = []
+        while let cutEnd = nextSentenceCut(in: remaining) {
+            let sentence = String(remaining[..<cutEnd])
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            remaining = String(remaining[cutEnd...])
+            guard sentence.count >= 2 else { continue }
+            if wordCount(sentence) > maxWordsPerTTSChunk {
+                chunks.append(contentsOf: splitLongSentenceIntoClauses(sentence))
+            } else {
+                chunks.append(sentence)
+            }
+        }
+        let tail = remaining.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !tail.isEmpty {
+            if wordCount(tail) > maxWordsPerTTSChunk {
+                chunks.append(contentsOf: splitLongSentenceIntoClauses(tail))
+            } else {
+                chunks.append(tail)
+            }
+        }
+        return chunks
+    }
+
     /// Returns the index just past a complete sentence (punctuation +
     /// terminating whitespace), or nil if no boundary is present yet.
-    private func nextSentenceCut(in text: String) -> String.Index? {
+    fileprivate static func nextSentenceCut(in text: String) -> String.Index? {
         var index = text.startIndex
         var wordCount = 0
         var inWord = false
@@ -778,6 +811,37 @@ final class StreamingTTSSession {
                 inWord = false
             }
 
+            if char == "," || char == ":" || char == ";" {
+                let nextIndex = text.index(after: index)
+                if wordCount >= Self.minimumWordsBeforePauseCut {
+                    guard nextIndex < text.endIndex else { return nextIndex }
+                    let nextChar = text[nextIndex]
+                    if nextChar.isWhitespace || nextChar.isNewline {
+                        var endIndex = nextIndex
+                        while endIndex < text.endIndex {
+                            let c = text[endIndex]
+                            guard c.isWhitespace || c.isNewline else { break }
+                            endIndex = text.index(after: endIndex)
+                        }
+                        return endIndex
+                    }
+                }
+            }
+
+            // Do not wait indefinitely if there is no full stop or comma-like
+            // pause at all. This is a last-resort safety cut, deliberately
+            // later than the natural comma threshold.
+            if wordCount >= Self.maxWordsPerTTSChunk,
+               (char.isWhitespace || char.isNewline) {
+                var endIndex = text.index(after: index)
+                while endIndex < text.endIndex {
+                    let c = text[endIndex]
+                    guard c.isWhitespace || c.isNewline else { break }
+                    endIndex = text.index(after: endIndex)
+                }
+                return endIndex
+            }
+
             if char == "." || char == "!" || char == "?" || char == "\n" {
                 let nextIndex = text.index(after: index)
                 let isNewline = char == "\n"
@@ -789,12 +853,23 @@ final class StreamingTTSSession {
                     continue
                 }
 
+                // Reject common abbreviations: "Mr.", "Dr.", "etc."
+                if char == "." {
+                    if let prevWord = Self.lastWord(in: text, before: index),
+                       Self.knownAbbreviations.contains(prevWord.lowercased()) {
+                        index = nextIndex
+                        continue
+                    }
+                }
+
                 guard nextIndex < text.endIndex else {
-                    // End of buffer — wait for more text. The LLM may
-                    // continue past this punctuation (e.g. a number like
-                    // "3.14" or a partial token). `finish()` flushes the
-                    // tail when the stream actually ends.
-                    return nil
+                    // A streamed LLM often emits terminal punctuation as
+                    // the last character of the current delta. Treat that
+                    // as a real boundary now so the TTS request can start
+                    // before `response.done` and before the full response
+                    // is logged. The minimum-word + abbreviation checks
+                    // above still protect common false positives.
+                    return nextIndex
                 }
 
                 let nextChar = text[nextIndex]
@@ -802,15 +877,6 @@ final class StreamingTTSSession {
                 if !endsSentence {
                     index = nextIndex
                     continue
-                }
-
-                // Reject common abbreviations: "Mr.", "Dr.", "etc."
-                if char == "." {
-                    if let prevWord = lastWord(in: text, before: index),
-                       Self.knownAbbreviations.contains(prevWord.lowercased()) {
-                        index = nextIndex
-                        continue
-                    }
                 }
 
                 // Walk past trailing whitespace so the next sentence
@@ -829,7 +895,7 @@ final class StreamingTTSSession {
         return nil
     }
 
-    private func lastWord(in text: String, before index: String.Index) -> String? {
+    private static func lastWord(in text: String, before index: String.Index) -> String? {
         var end = index
         while end > text.startIndex {
             let prev = text.index(before: end)
@@ -847,10 +913,9 @@ final class StreamingTTSSession {
 
     /// Schedules a chunk of pre-decoded PCM at the head of the playback
     /// chain. Used to play cached filler phrases ("let me take a look.")
-    /// the instant the streaming session opens — before the LLM has
-    /// emitted a single token. Subsequent LLM sentences enqueue behind
-    /// this and play in order, buying ~1-2 seconds of perceived latency
-    /// against model TTFT.
+    /// after a natural 300-500ms thinking beat. Subsequent LLM sentences
+    /// enqueue behind this and play in order, buying perceived latency
+    /// against model TTFT without sounding like an instant interruption.
     func enqueuePrebakedSamples(_ samples: [Int16]) {
         guard !isCancelled, !samples.isEmpty,
               let playerNode, let format else { return }
@@ -860,6 +925,9 @@ final class StreamingTTSSession {
         let streamFormat = format
         jobChain = Task { [weak self] in
             if let predecessor { _ = try? await predecessor.value }
+            try await Task.sleep(
+                nanoseconds: UInt64(Self.preResponseFillerDelayMilliseconds) * 1_000_000
+            )
             try Task.checkCancellation()
             guard let self, !self.isCancelled else { return }
 
@@ -990,13 +1058,17 @@ final class StreamingTTSSession {
 final class FillerPhraseLibrary {
     static let shared = FillerPhraseLibrary()
 
-    /// Default fillers — intentionally bland and non-committal. Avoid
-    /// greetings, agreement words, and screen-specific claims because
-    /// they sound wrong when prepended to short text-only replies.
+    /// Default fillers — short, natural delay-cover phrases. These are
+    /// pre-rendered because generating an opener on the critical path
+    /// would add exactly the latency the filler is meant to hide.
     static let defaultPhrases: [String] = [
         "one moment.",
-        "give me a second.",
-        "checking now."
+        "sure, give me a second.",
+        "let me check that.",
+        "sure, I'll take a look.",
+        "yeah, that makes sense.",
+        "let me think that through.",
+        "I'll look into that for you."
     ]
 
     private var samplesByPhrase: [String: [Int16]] = [:]
@@ -1067,17 +1139,72 @@ final class FillerPhraseLibrary {
     /// what binds Haiku's response to the filler ("let me check" → the
     /// reply continues from a checking posture instead of restarting).
     func randomFiller() -> FillerSelection? {
+        chooseFiller(preferredPhrases: phrases)
+    }
+
+    /// Picks a cached filler that matches the user's turn well enough to
+    /// sound intentional, while still falling back to a neutral cached
+    /// opener if the exact phrase is not prepared yet.
+    func contextualFiller(for transcript: String, screenContextNeeded: Bool) -> FillerSelection? {
+        let normalized = transcript
+            .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+            .lowercased()
+
+        let preferred: [String]
+        if screenContextNeeded || normalized.contains("look at") || normalized.contains("take a look") {
+            preferred = [
+                "sure, I'll take a look.",
+                "let me check that.",
+                "sure, give me a second."
+            ]
+        } else if normalized.contains("do we")
+                    || normalized.contains("should we")
+                    || normalized.contains("does that")
+                    || normalized.contains("is that")
+                    || normalized.contains("what i'm interested")
+                    || normalized.contains("what i’m interested") {
+            preferred = [
+                "yeah, that makes sense.",
+                "let me think that through.",
+                "sure, give me a second."
+            ]
+        } else if normalized.contains("check")
+                    || normalized.contains("find")
+                    || normalized.contains("search")
+                    || normalized.contains("research")
+                    || normalized.contains("look into") {
+            preferred = [
+                "let me check that.",
+                "I'll look into that for you.",
+                "sure, give me a second."
+            ]
+        } else {
+            preferred = [
+                "sure, give me a second.",
+                "one moment."
+            ]
+        }
+
+        return chooseFiller(preferredPhrases: preferred)
+    }
+
+    private func chooseFiller(preferredPhrases: [String]) -> FillerSelection? {
         let available = phrases.enumerated().compactMap { (index, phrase) -> (Int, String, [Int16])? in
             guard let samples = samplesByPhrase[phrase], !samples.isEmpty else { return nil }
             return (index, phrase, samples)
         }
         guard !available.isEmpty else { return nil }
 
-        let candidates: [(Int, String, [Int16])]
-        if available.count > 1, let last = lastChosenIndex {
-            candidates = available.filter { $0.0 != last }
-        } else {
+        let preferredSet = Set(preferredPhrases)
+        var candidates = available.filter { preferredSet.contains($0.1) }
+        if candidates.isEmpty {
             candidates = available
+        }
+        if candidates.count > 1, let last = lastChosenIndex {
+            let nonRepeats = candidates.filter { $0.0 != last }
+            if !nonRepeats.isEmpty {
+                candidates = nonRepeats
+            }
         }
         let pick = candidates.randomElement() ?? available[0]
         lastChosenIndex = pick.0
@@ -2394,6 +2521,150 @@ final class OpenAIRealtimeSpeechClient: OpenClickyTTSClient {
         return transcript.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    func analyzeImageResponse(
+        images: [(data: Data, label: String)],
+        systemPrompt: String,
+        userPrompt: String,
+        onTextChunk: @MainActor @Sendable @escaping (String) -> Void
+    ) async throws -> String {
+        guard let apiKey, !apiKey.isEmpty else {
+            throw NSError(
+                domain: "OpenAIRealtimeSpeechClient",
+                code: -1000,
+                userInfo: [NSLocalizedDescriptionKey: "OpenAI Realtime image analysis needs a Codex/OpenAI API key in Settings or OPENAI_API_KEY in the launch environment."]
+            )
+        }
+        guard var components = URLComponents(string: "wss://api.openai.com/v1/realtime") else {
+            throw NSError(domain: "OpenAIRealtimeSpeechClient", code: -1, userInfo: [NSLocalizedDescriptionKey: "OpenAI Realtime WebSocket URL is invalid."])
+        }
+        components.queryItems = [URLQueryItem(name: "model", value: model)]
+        guard let url = components.url else {
+            throw NSError(domain: "OpenAIRealtimeSpeechClient", code: -1, userInfo: [NSLocalizedDescriptionKey: "OpenAI Realtime WebSocket URL could not be created."])
+        }
+
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 60
+        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+
+        let webSocket = session.webSocketTask(with: request)
+        webSocket.resume()
+        defer {
+            webSocket.cancel(with: .normalClosure, reason: nil)
+        }
+
+        OpenClickyMessageLogStore.shared.append(
+            lane: "computer-use",
+            direction: "outgoing",
+            event: "openai_realtime.image_analysis.request",
+            fields: [
+                "model": model,
+                "imageCount": images.count,
+                "transport": "realtime_websocket",
+                "streamingMethod": "conversation.item.create + response.output_text.delta"
+            ]
+        )
+
+        try await waitForRealtimeConnection(on: webSocket)
+        try await sendJSON([
+            "type": "session.update",
+            "session": [
+                "type": "realtime",
+                "model": model,
+                "output_modalities": ["text"]
+            ]
+        ], to: webSocket)
+
+        var content: [[String: Any]] = []
+        for image in images {
+            content.append([
+                "type": "input_text",
+                "text": image.label
+            ])
+            content.append([
+                "type": "input_image",
+                "image_url": Self.imageDataURI(for: image.data)
+            ])
+        }
+        content.append([
+            "type": "input_text",
+            "text": userPrompt
+        ])
+
+        try await sendJSON([
+            "type": "conversation.item.create",
+            "item": [
+                "type": "message",
+                "role": "user",
+                "content": content
+            ]
+        ], to: webSocket)
+
+        try await sendJSON([
+            "type": "response.create",
+            "response": [
+                "output_modalities": ["text"],
+                "max_output_tokens": 512,
+                "instructions": systemPrompt
+            ]
+        ], to: webSocket)
+
+        var accumulatedText = ""
+        while true {
+            try Task.checkCancellation()
+            let event = try await receiveRealtimeEvent(from: webSocket)
+            let type = event["type"] as? String ?? ""
+            if type == "response.output_text.delta",
+               let delta = event["delta"] as? String {
+                accumulatedText += delta
+                let snapshot = accumulatedText
+                await MainActor.run { onTextChunk(snapshot) }
+            } else if type == "response.output_text.done",
+                      let text = event["text"] as? String,
+                      !text.isEmpty {
+                accumulatedText = text
+                let snapshot = accumulatedText
+                await MainActor.run { onTextChunk(snapshot) }
+            } else if type == "response.content_part.done",
+                      accumulatedText.isEmpty,
+                      let extracted = Self.firstTranscriptString(in: event),
+                      !extracted.isEmpty {
+                accumulatedText = extracted
+                await MainActor.run { onTextChunk(extracted) }
+            } else if type == "response.done" {
+                if accumulatedText.isEmpty,
+                   let extracted = Self.firstTranscriptString(in: event),
+                   !extracted.isEmpty {
+                    accumulatedText = extracted
+                    await MainActor.run { onTextChunk(extracted) }
+                }
+                break
+            } else if type == "error" {
+                throw realtimeError(from: event)
+            }
+        }
+
+        let trimmed = accumulatedText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            throw NSError(
+                domain: "OpenAIRealtimeSpeechClient",
+                code: -1,
+                userInfo: [NSLocalizedDescriptionKey: "OpenAI Realtime image analysis returned an empty response."]
+            )
+        }
+
+        OpenClickyMessageLogStore.shared.append(
+            lane: "computer-use",
+            direction: "incoming",
+            event: "openai_realtime.image_analysis.response",
+            fields: [
+                "model": model,
+                "responseLength": trimmed.count,
+                "transport": "realtime_websocket"
+            ]
+        )
+        return trimmed
+    }
+
     func fetchSentenceSamples(_ text: String) async throws -> [Int16] {
         guard let apiKey, !apiKey.isEmpty else {
             throw NSError(
@@ -2969,6 +3240,11 @@ final class OpenAIRealtimeSpeechClient: OpenClickyTTSClient {
         let errorPayload = event["error"] as? [String: Any]
         let message = errorPayload?["message"] as? String ?? "OpenAI Realtime playback failed."
         return NSError(domain: "OpenAIRealtimeSpeechClient", code: -2, userInfo: [NSLocalizedDescriptionKey: message])
+    }
+
+    private nonisolated static func imageDataURI(for imageData: Data) -> String {
+        let mimeType = imageData.starts(with: [0x89, 0x50, 0x4E, 0x47]) ? "image/png" : "image/jpeg"
+        return "data:\(mimeType);base64,\(imageData.base64EncodedString())"
     }
 
     private nonisolated static func microphoneInputError(_ message: String) -> NSError {

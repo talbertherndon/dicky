@@ -153,20 +153,13 @@ final class CodexPointDetector {
         let executable = try CodexRuntimeLocator.codexExecutableURL(bundle: .main)
         let outputURL = workingDirectory.appendingPathComponent("codex-point-response.txt", isDirectory: false)
 
-        var arguments = ["exec"]
-        for imageURL in imageURLs {
-            arguments.append(contentsOf: ["--image", imageURL.path])
-        }
-        arguments.append(contentsOf: [
-            "--model", model,
-            "--sandbox", "danger-full-access",
-            "--ask-for-approval", "never",
-            "--dangerously-bypass-approvals-and-sandbox",
-            "--skip-git-repo-check",
-            "--cd", workingDirectory.path,
-            "--output-last-message", outputURL.path,
-            prompt
-        ])
+        var arguments = Self.codexExecArguments(
+            model: model,
+            imageURLs: imageURLs,
+            workingDirectory: workingDirectory,
+            outputURL: outputURL,
+            prompt: prompt
+        )
 
         let stdout: String
         do {
@@ -204,6 +197,43 @@ final class CodexPointDetector {
             .trimmingCharacters(in: .whitespacesAndNewlines)
         return lastMessage?.isEmpty == false ? lastMessage! : stdout
     }
+
+    private static func codexExecArguments(
+        model: String,
+        imageURLs: [URL],
+        workingDirectory: URL,
+        outputURL: URL,
+        prompt: String
+    ) -> [String] {
+        var arguments = ["exec"]
+        for imageURL in imageURLs {
+            arguments.append(contentsOf: ["--image", imageURL.path])
+        }
+        arguments.append(contentsOf: [
+            "--model", model,
+            "--sandbox", "danger-full-access",
+            "-c", "approval_policy=\"never\"",
+            "--dangerously-bypass-approvals-and-sandbox",
+            "--skip-git-repo-check",
+            "--cd", workingDirectory.path,
+            "--output-last-message", outputURL.path,
+            prompt
+        ])
+        return arguments
+    }
+
+    #if DEBUG
+    static func testCodexExecArguments(model: String = "gpt-5.4") -> [String] {
+        let directory = URL(fileURLWithPath: "/tmp/OpenClickyCodexPointDetectorTest", isDirectory: true)
+        return codexExecArguments(
+            model: model,
+            imageURLs: [directory.appendingPathComponent("screen.jpg", isDirectory: false)],
+            workingDirectory: directory,
+            outputURL: directory.appendingPathComponent("codex-point-response.txt", isDirectory: false),
+            prompt: "click the target"
+        )
+    }
+    #endif
 
     private static func shouldRetryWithCompatibilityFallback(_ error: Error) -> Bool {
         let message = error.localizedDescription

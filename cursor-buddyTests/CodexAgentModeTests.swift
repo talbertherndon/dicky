@@ -23,6 +23,8 @@ struct CodexAgentModeTests {
         #expect(rendered.contains("bundled_skills_dir = \"OpenClickyBundledSkills\""))
         #expect(rendered.contains("enabled = true"))
         #expect(rendered.contains("https://developers.openai.com/mcp"))
+        #expect(rendered.contains("[mcp_servers.composio]"))
+        #expect(rendered.contains("https://connect.composio.dev/mcp"))
     }
 
     @Test func codexConfigKeepsCustomResponsesBackendAPIKeyBackcompat() throws {
@@ -75,6 +77,21 @@ struct CodexAgentModeTests {
 
         #expect(!rendered.contains("[mcp_servers.cuaDriver]"))
         #expect(!rendered.contains("CUA_DRIVER_TELEMETRY_ENABLED"))
+    }
+
+    @Test func codexConfigCanDisableComposioConnectMCPServer() throws {
+        let template = ClickyCodexConfigTemplate(
+            model: "gpt-5.5",
+            reasoningEffort: "medium",
+            workerBaseURL: URL(string: "https://api.openai.com/v1")!,
+            includeOpenAIDeveloperDocsMCP: false,
+            includeComposioConnectMCP: false
+        )
+
+        let rendered = template.render()
+
+        #expect(!rendered.contains("[mcp_servers.composio]"))
+        #expect(!rendered.contains("https://connect.composio.dev/mcp"))
     }
 
     @Test func cuaDriverMCPConfigurationPrefersExplicitOpenClickyOverride() throws {
@@ -236,6 +253,15 @@ struct CodexAgentModeTests {
         #expect(CompanionManager.hybridAgentTaskInstruction(from: "What do you think is on my screen?") == nil)
     }
 
+    @MainActor @Test func agentDelegationPhrasesDoNotCancelCurrentAgent() throws {
+        #expect(!CompanionManager.isCancelCurrentAgentTaskRequest("Can you start another agent to inspect the logs?"))
+        #expect(!CompanionManager.isCancelCurrentAgentTaskRequest("Please get an agent to look at what just happened."))
+        #expect(!CompanionManager.isCancelAllAgentTasksRequest("Can you start another agent to inspect the logs?"))
+
+        #expect(CompanionManager.isCancelCurrentAgentTaskRequest("cancel the agent"))
+        #expect(CompanionManager.isCancelAllAgentTasksRequest("cancel all agents"))
+    }
+
     @MainActor @Test func voiceContextKeepsRecentRoutedAgentPromptForFollowUps() throws {
         let now = Date()
         let history = CompanionManager.voiceConversationHistoryIncludingRecentUnpairedPrompts(
@@ -278,5 +304,45 @@ struct CodexAgentModeTests {
         let capabilities = try #require(params["capabilities"] as? [String: Any])
 
         #expect((capabilities["experimentalApi"] as? Bool) == true)
+    }
+
+    @MainActor @Test func streamingTTSUsesCommaPauseAfterLongClause() throws {
+        let chunks = StreamingTTSSession.testChunksForStreaming(
+            "OpenClicky should keep speaking to the natural sentence boundary when the opening clause is short, but once a long clause has enough words to sound like a proper spoken unit, it can pause on that comma and continue."
+        )
+
+        #expect(chunks.count >= 2)
+        #expect(chunks[0].hasSuffix(","))
+        #expect(StreamingTTSSession.wordCount(chunks[0]) >= 15)
+    }
+
+    @MainActor @Test func streamingTTSKeepsShortCommaClauseWithSentence() throws {
+        let chunks = StreamingTTSSession.testChunksForStreaming(
+            "OpenClicky checks the comma, then waits for the full stop."
+        )
+
+        #expect(chunks == ["OpenClicky checks the comma, then waits for the full stop."])
+    }
+
+    @MainActor @Test func streamingTTSUsesDefensiveCutForVeryLongUnpunctuatedSentence() throws {
+        let chunks = StreamingTTSSession.testChunksForStreaming(
+            "OpenClicky found the cause in the live path because the first assistant sentence was extremely long and still streaming without punctuation while the visible transcript had already advanced so the voice pipeline still needs one defensive escape hatch for uninterrupted model output"
+        )
+
+        #expect(chunks.count >= 2)
+        #expect(StreamingTTSSession.wordCount(chunks[0]) <= StreamingTTSSession.maxWordsPerTTSChunk)
+    }
+
+    @MainActor @Test func streamingTTSTreatsTerminalPunctuationAsReadyDuringStreaming() throws {
+        let chunks = StreamingTTSSession.testChunksForStreaming(
+            "OpenClicky can speak this sentence as soon as the full stop arrives."
+        )
+
+        #expect(chunks == ["OpenClicky can speak this sentence as soon as the full stop arrives."])
+    }
+
+    @MainActor @Test func preResponseFillerUsesNaturalThinkingBeat() throws {
+        #expect(StreamingTTSSession.preResponseFillerDelayMilliseconds >= 300)
+        #expect(StreamingTTSSession.preResponseFillerDelayMilliseconds <= 500)
     }
 }

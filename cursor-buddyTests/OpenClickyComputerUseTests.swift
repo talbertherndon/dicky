@@ -68,22 +68,25 @@ struct OpenClickyComputerUseTests {
         #expect(window.captureLabel == "CUA Swift focused window (Xcode - ContentView.swift)")
     }
 
-    @Test func realtimeCompositeAppCommandKeepsOnlyTheAppTarget() throws {
+    @Test func realtimeCompositeAppCommandIsNotReducedToOpenApp() throws {
         #expect(
             CompanionManager.testLocalAppOpenTarget(
                 from: "Can you open Spotify and play AC/DC Back to Black?"
-            ) == "Spotify"
+            ) == nil
         )
         #expect(
             CompanionManager.testLocalAppOpenTarget(
                 from: "Can you open Spotify and can you play AC/DC Back to Black?"
-            ) == "Spotify"
+            ) == nil
         )
         #expect(
             CompanionManager.testLocalAppOpenTarget(
                 from: "Open Chrome and go to amazon.co.uk"
             ) == nil
         )
+        #expect(CompanionManager.testCompositeAppAction(from: "Open Chrome and go to amazon.co.uk") == nil)
+        #expect(CompanionManager.testWebOpenTarget(from: "Open Chrome and go to amazon.co.uk")?.url == "https://amazon.co.uk")
+        #expect(CompanionManager.testWebOpenTarget(from: "Open Chrome and go to amazon.co.uk")?.browserAppName == "Google Chrome")
     }
 
     @Test func spokenPlayButtonRequestsMapToARealKey() throws {
@@ -112,10 +115,90 @@ struct OpenClickyComputerUseTests {
         )
         #expect(mailAction?.appName == "Mail")
         #expect(mailAction?.actionText == "search for invoices")
+
+        let bareSpotifyAction = CompanionManager.testCompositeAppAction(
+            from: "Spotify and play Back in Black."
+        )
+        #expect(bareSpotifyAction?.appName == "Spotify")
+        #expect(bareSpotifyAction?.actionText == "play Back in Black")
+        #expect(CompanionManager.testSpotifyPlaybackQuery(from: "Spotify and play Back in Black.") == "Back in Black")
+        #expect(CompanionManager.testStandaloneSpotifyPlaybackQuery(from: "Can you play Back in Black?") == "Back in Black")
+        #expect(CompanionManager.testStandaloneSpotifyPlaybackQuery(from: "play the video") == nil)
+    }
+
+    @Test func spotifySearchPlayRouteStaysOnComputerUseExecution() throws {
+        let nativeMethods = CompanionManager.testSpotifySearchPlayExecutionMethods(for: .nativeSwift)
+        #expect(nativeMethods.started == "NSWorkspace.open_spotify_uri + OpenClickyNativeComputerUseController.pressKey")
+        #expect(nativeMethods.completed == "NSWorkspace.open_spotify_uri + OpenClickyNativeComputerUseController.pressKey")
+        #expect(!nativeMethods.completed.localizedCaseInsensitiveContains("AppleScript"))
+        #expect(!nativeMethods.completed.localizedCaseInsensitiveContains("verification"))
+
+        let backgroundMethods = CompanionManager.testSpotifySearchPlayExecutionMethods(for: .backgroundComputerUse)
+        #expect(backgroundMethods.started == "NSWorkspace.open_spotify_uri + BackgroundComputerUse /v1/press_key")
+        #expect(backgroundMethods.completed == "NSWorkspace.open_spotify_uri + BackgroundComputerUse /v1/press_key")
+        #expect(!backgroundMethods.completed.localizedCaseInsensitiveContains("AppleScript"))
+        #expect(!backgroundMethods.completed.localizedCaseInsensitiveContains("verification"))
     }
 
     @Test func realtimeTwoIsTheDefaultVoiceInteractionModel() throws {
         #expect(OpenClickyModelCatalog.defaultVoiceResponseModelID == "gpt-realtime-2")
         #expect(OpenClickyModelCatalog.defaultCodexActionsModelID != OpenClickyModelCatalog.defaultVoiceResponseModelID)
+    }
+
+    @Test func voiceResponseModelsDoNotUseShortTTSGenerationCap() throws {
+        let responseBudgets = OpenClickyModelCatalog.responseVoiceModels.map(\.maxOutputTokens)
+        #expect(responseBudgets.allSatisfy { $0 >= 64_000 })
+    }
+
+    @Test func realtimeModelsResolveToNonSpeechModelsOutsideRealtimeTransport() throws {
+        let analysisModel = OpenClickyModelCatalog.voiceAnalysisModel(withID: "gpt-realtime-2")
+        #expect(analysisModel.id == OpenClickyModelCatalog.defaultVoiceAnalysisModelID)
+        #expect(!OpenClickyModelCatalog.isSpeechModelID(analysisModel.id))
+
+        let codexModel = OpenClickyModelCatalog.codexVoiceSessionModel(withID: "gpt-realtime-2")
+        #expect(codexModel.id == OpenClickyModelCatalog.defaultCodexActionsModelID)
+        #expect(!OpenClickyModelCatalog.isSpeechModelID(codexModel.id))
+    }
+
+    @Test func nonSpeechModelsRemainSelectedForVoiceAnalysis() throws {
+        #expect(OpenClickyModelCatalog.voiceAnalysisModel(withID: "gpt-5.5").id == "gpt-5.5")
+        #expect(OpenClickyModelCatalog.codexVoiceSessionModel(withID: "gpt-5.5").id == "gpt-5.5")
+    }
+
+    @Test func realtimeVoiceUsesRealtimeForComputerUsePointing() throws {
+        #expect(
+            CompanionManager.testComputerUsePointingResolver(
+                selectedVoiceModelID: "gpt-realtime-2",
+                selectedComputerUseModelID: "gpt-5.5"
+            ) == "openai_realtime"
+        )
+    }
+
+    @Test func nonRealtimeVoiceKeepsSelectedComputerUsePointingResolver() throws {
+        #expect(
+            CompanionManager.testComputerUsePointingResolver(
+                selectedVoiceModelID: "gpt-5.5",
+                selectedComputerUseModelID: "gpt-5.5"
+            ) == "codex_cli"
+        )
+        #expect(
+            CompanionManager.testComputerUsePointingResolver(
+                selectedVoiceModelID: "claude-haiku-4-5",
+                selectedComputerUseModelID: "gpt-5.4"
+            ) == "codex_cli"
+        )
+        #expect(
+            CompanionManager.testComputerUsePointingResolver(
+                selectedVoiceModelID: "claude-haiku-4-5",
+                selectedComputerUseModelID: "claude-sonnet-4-6"
+            ) == "anthropic_api"
+        )
+    }
+
+    @Test func codexPointDetectorDoesNotUseRemovedApprovalFlag() throws {
+        let arguments = CodexPointDetector.testCodexExecArguments()
+        #expect(!arguments.contains("--ask-for-approval"))
+        #expect(arguments.contains("-c"))
+        #expect(arguments.contains("approval_policy=\"never\""))
     }
 }

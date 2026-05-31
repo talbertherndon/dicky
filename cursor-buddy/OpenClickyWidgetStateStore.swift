@@ -212,7 +212,7 @@ final class OpenClickyWidgetStateStore {
             voiceInteractions: countOccurrences(of: "\"event\":\"voice.transcript\"", in: logText),
             agentTasksCreated: countOccurrences(of: "\"event\":\"openclicky.agent_task.created\"", in: logText),
             agentCompletions: countOccurrences(of: "\"method\":\"turn/completed\"", in: logText),
-            agentFailures: countOccurrences(of: "\"event\":\"codex.stderr\"", in: logText) + countOccurrences(of: "\"method\":\"error\"", in: logText),
+            agentFailures: countAgentFailureEvents(in: logText),
             logReviewComments: reviewText.split(separator: "\n", omittingEmptySubsequences: true).count
         )
     }
@@ -274,6 +274,49 @@ final class OpenClickyWidgetStateStore {
             searchRange = range.upperBound..<haystack.endIndex
         }
         return count
+    }
+
+    private func countAgentFailureEvents(in logText: String) -> Int {
+        logText
+            .split(separator: "\n", omittingEmptySubsequences: true)
+            .reduce(into: 0) { count, rawLine in
+                let line = String(rawLine)
+                guard line.contains(#""event":"codex.stderr""#) || line.contains(#""method":"error""#) else {
+                    return
+                }
+                if Self.isNonFatalAgentDiagnosticLogLine(line) {
+                    return
+                }
+                count += 1
+            }
+    }
+
+    private nonisolated static func isNonFatalAgentDiagnosticLogLine(_ line: String) -> Bool {
+        let normalized = line
+            .replacingOccurrences(of: #"\\u001b\[[0-9;]*m"#, with: "", options: .regularExpression)
+            .replacingOccurrences(of: #"\u{001B}\[[0-9;]*m"#, with: "", options: .regularExpression)
+            .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+            .lowercased()
+
+        if normalized.contains("rmcp::transport::worker")
+            && normalized.contains("worker quit with fatal")
+            && (
+                normalized.contains("authrequired")
+                || normalized.contains("no authorization: bearer header")
+                || normalized.contains("data did not match any variant of untagged enum jsonrpcmessage")
+            ) {
+            return true
+        }
+
+        if normalized.contains("responses_websocket")
+            && normalized.contains("failed to connect to websocket")
+            && normalized.contains("bad gateway") {
+            return true
+        }
+
+        return normalized.contains("failed to load skill")
+            && normalized.contains("invalid description")
+            && normalized.contains("exceeds maximum length")
     }
 
     private func sanitizedSnippet(_ text: String?, maxLength: Int) -> String? {

@@ -250,6 +250,7 @@ struct OpenClickyWidgetStateStoreTests {
         {"event":"openclicky.agent_task.created","task":"build"}
         {"method":"turn/completed"}
         {"event":"codex.stderr","message":"failed to build"}
+        {"event":"codex.stderr","fields":{"line":"2026-05-31T19:36:53Z ERROR rmcp::transport::worker: worker quit with fatal: Transport channel closed, when AuthRequired(AuthRequiredError { www_authenticate_header: \\"Bearer error=\\\\\\"unauthorized\\\\\\", error_description=\\\\\\"No Authorization: Bearer header on request\\\\\\"\\" })"}}
         """
         try? logContent.write(to: logStore.currentLogFile, atomically: true, encoding: .utf8)
         

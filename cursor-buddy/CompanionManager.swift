@@ -140,6 +140,28 @@ private struct OpenClickyCompositeAppActionRequest {
     let instruction: String
 }
 
+private struct OpenClickyCompositeAppSearchActionRequest {
+    let appName: String
+    let query: String
+    let instruction: String
+}
+
+private enum OpenClickySpotifyPlaybackControlAction: String {
+    case play
+    case pause
+    case playPause
+    case next
+    case previous
+}
+
+private enum OpenClickyComputerUsePointingResolver: String {
+    case openAIRealtime = "openai_realtime"
+    case anthropicAPI = "anthropic_api"
+    case codexCLI = "codex_cli"
+    case openAIResponses = "openai_responses"
+    case unsupported = "unsupported"
+}
+
 nonisolated private struct OpenClickyLocalAutomationResult: Sendable {
     let output: String
     let errorOutput: String
@@ -498,7 +520,7 @@ final class CompanionManager: ObservableObject {
     }()
 
     private lazy var openAIAPI: OpenAIAPI = {
-        let modelOption = OpenClickyModelCatalog.voiceResponseModel(withID: selectedModel)
+        let modelOption = OpenClickyModelCatalog.voiceAnalysisModel(withID: selectedModel)
         return OpenAIAPI(
             apiKey: Self.openAIAPIKey,
             model: modelOption.id,
@@ -512,7 +534,8 @@ final class CompanionManager: ObservableObject {
     }()
 
     private lazy var codexVoiceSession: CodexVoiceSession = {
-        return CodexVoiceSession(model: selectedModel, homeManager: codexHomeManager)
+        let modelOption = OpenClickyModelCatalog.codexVoiceSessionModel(withID: selectedModel)
+        return CodexVoiceSession(model: modelOption.id, homeManager: codexHomeManager)
     }()
 
     private lazy var elevenLabsTTSClient: ElevenLabsTTSClient = {
@@ -1428,11 +1451,7 @@ final class CompanionManager: ObservableObject {
     @Published private(set) var isOverlayVisible: Bool = false
 
     /// The model used for voice responses. Persisted to UserDefaults.
-    @Published var selectedModel: String = OpenClickyModelCatalog.voiceResponseModel(
-        withID: UserDefaults.standard.string(forKey: "selectedVoiceResponseModel")
-            ?? UserDefaults.standard.string(forKey: "selectedClaudeModel")
-            ?? OpenClickyModelCatalog.defaultVoiceResponseModelID
-    ).id
+    @Published var selectedModel: String = CompanionManager.initialVoiceResponseModelID()
     @Published var selectedComputerUseModel: String = OpenClickyModelCatalog.computerUseModel(
         withID: UserDefaults.standard.string(forKey: "selectedComputerUseModel") ?? OpenClickyModelCatalog.defaultComputerUseModelID
     ).id
@@ -1504,9 +1523,37 @@ final class CompanionManager: ObservableObject {
     private var agentDockFollowTimer: Timer?
     private var isRealtimeBidirectionalVoiceCaptureActive = false
     private var isRealtimeBidirectionalVoiceInputReady = false
+    private var pendingRealtimeBidirectionalFinishSource: String?
     private var realtimeBidirectionalVoiceCaptureStartedAt: Date?
     private var realtimeBidirectionalVoiceTask: Task<Void, Never>?
     private var realtimeBidirectionalVoiceTurnGeneration: UInt64 = 0
+
+    private static let realtimeVoiceDefaultMigrationKey = "openClickyRealtimeVoiceDefaultMigrated"
+
+    private static func initialVoiceResponseModelID() -> String {
+        let defaults = UserDefaults.standard
+        let storedModel = defaults.string(forKey: "selectedVoiceResponseModel")
+        let storedSpeechModel = defaults.string(forKey: "openClickySpeechModel")
+
+        // OpenClicky briefly stored GPT-5.5 as the voice-response default
+        // while Realtime 2 lived in a separate speech-model setting. That
+        // still routes live voice through Deepgram -> text model -> TTS,
+        // which is the several-second first-audio delay the user is rejecting.
+        // Migrate that stale default once so existing installs actually use
+        // the speech-to-speech Realtime path they now default to.
+        if storedModel == "gpt-5.5",
+           storedSpeechModel == OpenClickyModelCatalog.defaultSpeechModelID,
+           !defaults.bool(forKey: realtimeVoiceDefaultMigrationKey) {
+            defaults.set(OpenClickyModelCatalog.defaultSpeechModelID, forKey: "selectedVoiceResponseModel")
+            defaults.set(true, forKey: realtimeVoiceDefaultMigrationKey)
+            return OpenClickyModelCatalog.defaultSpeechModelID
+        }
+
+        let requestedModel = storedModel
+            ?? defaults.string(forKey: "selectedClaudeModel")
+            ?? OpenClickyModelCatalog.defaultVoiceResponseModelID
+        return OpenClickyModelCatalog.voiceResponseModel(withID: requestedModel).id
+    }
 
     func setSelectedModel(_ model: String) {
         let selectedVoiceResponseModel = OpenClickyModelCatalog.voiceResponseModel(withID: model)
@@ -1569,11 +1616,12 @@ final class CompanionManager: ObservableObject {
             claudeAgentSDKAPI?.model = modelOption.id
             claudeAgentSDKAPI?.maxOutputTokens = modelOption.maxOutputTokens
         case .openAI:
-            openAIAPI.model = modelOption.id
-            openAIAPI.maxOutputTokens = modelOption.maxOutputTokens
-            codexVoiceSession.model = modelOption.id
+            let analysisModel = OpenClickyModelCatalog.voiceAnalysisModel(withID: modelOption.id)
+            openAIAPI.model = analysisModel.id
+            openAIAPI.maxOutputTokens = analysisModel.maxOutputTokens
+            codexVoiceSession.model = OpenClickyModelCatalog.codexVoiceSessionModel(withID: analysisModel.id).id
         case .codex:
-            codexVoiceSession.model = modelOption.id
+            codexVoiceSession.model = OpenClickyModelCatalog.codexVoiceSessionModel(withID: modelOption.id).id
         case .deepgram:
             deepgramVoiceAgentClient.updateConfiguration(
                 apiKey: AppBundleConfiguration.deepgramAPIKey(),
@@ -2135,6 +2183,8 @@ final class CompanionManager: ObservableObject {
             return .ok(["displayed": "primary_caption", "durationMs": Int(duration * 1000)])
         case .captureScreenshot(let focused):
             return await captureExternalControlScreenshots(focused: focused)
+        case .click(let point, let caption):
+            return clickExternalControlPoint(point, caption: caption)
         case .clear:
             clearExternalProxyOverlay()
             return .ok(["cleared": true])
@@ -2318,6 +2368,53 @@ final class CompanionManager: ObservableObject {
             }
             return .ok(["screens": screens, "count": screens.count, "focused": focused])
         } catch {
+            return .error(500, error.localizedDescription)
+        }
+    }
+
+    private func clickExternalControlPoint(_ point: CGPoint, caption: String?) -> OpenClickyExternalControlResponse {
+        let targetPoint = Self.clampedExternalCursorPoint(point)
+        do {
+            if !nativeComputerUseController.isEnabled {
+                nativeComputerUseController.setEnabled(true)
+            }
+            try nativeComputerUseController.click(at: targetPoint)
+            detectedElementScreenLocation = targetPoint
+            detectedElementDisplayFrame = NSScreen.screen(containingOrNearestTo: targetPoint)?.frame
+            detectedElementBubbleText = Self.pointingBubbleText(for: caption)
+            rememberPointedElement(at: targetPoint, displayFrame: detectedElementDisplayFrame, label: caption)
+            OpenClickyMessageLogStore.shared.append(
+                lane: "computer-use",
+                direction: "outgoing",
+                event: "external_control.click",
+                fields: [
+                    "executor": "openClickyControl",
+                    "executionMethod": "OpenClickyNativeComputerUseController.click",
+                    "x": Int(targetPoint.x),
+                    "y": Int(targetPoint.y),
+                    "caption": caption ?? ""
+                ]
+            )
+            return .ok([
+                "clicked": true,
+                "x": targetPoint.x,
+                "y": targetPoint.y,
+                "caption": caption ?? ""
+            ])
+        } catch {
+            OpenClickyMessageLogStore.shared.append(
+                lane: "computer-use",
+                direction: "error",
+                event: "external_control.click_error",
+                fields: [
+                    "executor": "openClickyControl",
+                    "executionMethod": "OpenClickyNativeComputerUseController.click",
+                    "x": Int(targetPoint.x),
+                    "y": Int(targetPoint.y),
+                    "caption": caption ?? "",
+                    "error": error.localizedDescription
+                ]
+            )
             return .error(500, error.localizedDescription)
         }
     }
@@ -3255,20 +3352,28 @@ final class CompanionManager: ObservableObject {
         return String(flattened.prefix(maxLength))
     }
 
-    private func voiceResponseExecutionFields() -> [String: Any] {
+    private func voiceResponseExecutionFields(effectiveModelID: String? = nil) -> [String: Any] {
         let selectedVoiceResponseModel = OpenClickyModelCatalog.voiceResponseModel(withID: selectedModel)
+        let executionModel = effectiveModelID.map { OpenClickyModelCatalog.voiceResponseModel(withID: $0) }
+            ?? selectedVoiceResponseModel
         var fields: [String: Any] = [
             "executor": "voice_response",
-            "model": selectedVoiceResponseModel.id,
-            "modelProvider": selectedVoiceResponseModel.provider.rawValue,
-            "maxOutputTokens": selectedVoiceResponseModel.maxOutputTokens,
+            "model": executionModel.id,
+            "modelProvider": executionModel.provider.rawValue,
+            "maxOutputTokens": executionModel.maxOutputTokens,
             "playbackEngine": selectedTTSProvider.rawValue,
             "playbackController": activeTTSControllerName,
             "speechModel": selectedSpeechModel,
             "speechVoice": activeRealtimeSpeechVoiceID
         ]
 
-        switch selectedVoiceResponseModel.provider {
+        if executionModel.id != selectedVoiceResponseModel.id {
+            fields["selectedVoiceResponseModel"] = selectedVoiceResponseModel.id
+            fields["visualAnalysisModel"] = executionModel.id
+            fields["realtimeVisualPathOverride"] = OpenClickyModelCatalog.isSpeechModelID(selectedVoiceResponseModel.id)
+        }
+
+        switch executionModel.provider {
         case .anthropic:
             if AppBundleConfiguration.anthropicAPIKey() != nil {
                 fields["executionMethod"] = "ClaudeAPI.analyzeImageStreaming"
@@ -3289,7 +3394,7 @@ final class CompanionManager: ObservableObject {
                 fields["streamingMethod"] = "claude_agent_sdk_query"
             }
         case .openAI:
-            if OpenClickyModelCatalog.isSpeechModelID(selectedVoiceResponseModel.id) {
+            if OpenClickyModelCatalog.isSpeechModelID(executionModel.id) {
                 fields["executionMethod"] = "OpenAIRealtimeSpeechClient.beginBidirectionalVoiceTurn"
                 fields["authMode"] = "openai_api_key_primary"
                 fields["transport"] = "realtime_websocket"
@@ -3297,7 +3402,7 @@ final class CompanionManager: ObservableObject {
                 fields["inputPath"] = "realtime_input_audio_buffer"
                 fields["bypassesWhisper"] = true
                 fields["playbackEngine"] = OpenClickyTTSProvider.openAIRealtime.rawValue
-                fields["speechModel"] = selectedVoiceResponseModel.id
+                fields["speechModel"] = executionModel.id
             } else if AppBundleConfiguration.openAIAPIKey() != nil {
                 fields["executionMethod"] = "OpenAIAPI.analyzeImageStreaming"
                 fields["authMode"] = "openai_api_key_primary"
@@ -3388,10 +3493,6 @@ final class CompanionManager: ObservableObject {
                 return
             }
 
-            // Cancel any in-progress response and TTS from a previous utterance.
-            // Realtime capture handles this above so its "still speaking"
-            // defer guard can run before anything stops playback.
-            interruptCurrentVoiceResponse()
             clearDetectedElementLocation()
             liveHandledComputerUseFingerprints.removeAll()
 
@@ -3403,6 +3504,13 @@ final class CompanionManager: ObservableObject {
                     },
                     submitDraftText: { [weak self] finalTranscript in
                         self?.handleFinalVoiceTranscript(finalTranscript)
+                    },
+                    onWillStartRecording: { [weak self] in
+                        // Only cut playback once the non-Realtime dictation
+                        // path is actually going to capture audio. A quick
+                        // press/release during provider or permission startup
+                        // should not skip the current spoken reply.
+                        self?.interruptCurrentVoiceResponse()
                     }
                 )
             }
@@ -3539,7 +3647,6 @@ final class CompanionManager: ObservableObject {
             return
         }
 
-        interruptCurrentVoiceResponse()
         clearDetectedElementLocation()
         liveHandledComputerUseFingerprints.removeAll()
         Task { [weak self] in
@@ -3550,6 +3657,9 @@ final class CompanionManager: ObservableObject {
                 submitDraftText: { [weak self] finalTranscript in
                     self?.wakeWordAudioDucker.restore(reason: "wake_word_dictation_completed")
                     self?.handleFinalVoiceTranscript(finalTranscript)
+                },
+                onWillStartRecording: { [weak self] in
+                    self?.interruptCurrentVoiceResponse()
                 }
             )
         }
@@ -3619,6 +3729,7 @@ final class CompanionManager: ObservableObject {
         liveHandledComputerUseFingerprints.removeAll()
         isRealtimeBidirectionalVoiceCaptureActive = true
         isRealtimeBidirectionalVoiceInputReady = false
+        pendingRealtimeBidirectionalFinishSource = nil
         realtimeBidirectionalVoiceCaptureStartedAt = Date()
         voiceState = .listening
         currentAudioPowerLevel = 0
@@ -3707,15 +3818,31 @@ final class CompanionManager: ObservableObject {
                     }
                     self.isRealtimeBidirectionalVoiceInputReady = true
                     self.voiceState = .listening
+                    let pendingFinishSource = self.pendingRealtimeBidirectionalFinishSource
+                    self.pendingRealtimeBidirectionalFinishSource = nil
                     OpenClickyMessageLogStore.shared.append(
                         lane: "voice",
                         direction: "internal",
                         event: "voice.realtime_bidirectional.input_ready",
                         fields: [
                             "source": source,
+                            "pendingFinish": pendingFinishSource != nil,
                             "startupDurationMs": Self.elapsedMilliseconds(since: startedAt)
                         ]
                     )
+                    if let pendingFinishSource {
+                        OpenClickyMessageLogStore.shared.append(
+                            lane: "voice",
+                            direction: "internal",
+                            event: "voice.realtime_bidirectional.pending_finish_committed",
+                            fields: [
+                                "source": pendingFinishSource,
+                                "startupDurationMs": Self.elapsedMilliseconds(since: startedAt),
+                                "captureDurationMs": Self.elapsedMilliseconds(since: self.realtimeBidirectionalVoiceCaptureStartedAt)
+                            ]
+                        )
+                        _ = self.finishBidirectionalRealtimeVoiceCaptureIfNeeded(source: pendingFinishSource)
+                    }
                 }
             } catch {
                 await MainActor.run {
@@ -3729,25 +3856,17 @@ final class CompanionManager: ObservableObject {
     private func finishBidirectionalRealtimeVoiceCaptureIfNeeded(source: String) -> Bool {
         guard isRealtimeBidirectionalVoiceCaptureActive else { return false }
         if !isRealtimeBidirectionalVoiceInputReady {
-            isRealtimeBidirectionalVoiceCaptureActive = false
-            isRealtimeBidirectionalVoiceInputReady = false
-            realtimeBidirectionalVoiceCaptureStartedAt = nil
-            realtimeBidirectionalVoiceTask?.cancel()
-            realtimeBidirectionalVoiceTask = nil
-            openAIRealtimeSpeechClient.cancelBidirectionalVoiceTurn()
-            deepgramVoiceAgentClient.cancelBidirectionalVoiceTurn()
-            currentAudioPowerLevel = 0
-            wakeWordAudioDucker.restore(reason: "realtime_cancelled_before_ready")
-            voiceState = .idle
+            pendingRealtimeBidirectionalFinishSource = source
             OpenClickyMessageLogStore.shared.append(
                 lane: "voice",
                 direction: "internal",
-                event: "voice.realtime_bidirectional.start_cancelled_before_ready",
+                event: "voice.realtime_bidirectional.finish_deferred_until_ready",
                 fields: [
                     "source": source,
                     "speechModel": selectedModel,
                     "speechVoice": activeRealtimeSpeechVoiceID,
-                    "inputPath": activeRealtimeInputPath
+                    "inputPath": activeRealtimeInputPath,
+                    "captureDurationMs": Self.elapsedMilliseconds(since: realtimeBidirectionalVoiceCaptureStartedAt)
                 ]
             )
             return true
@@ -3755,6 +3874,7 @@ final class CompanionManager: ObservableObject {
 
         isRealtimeBidirectionalVoiceCaptureActive = false
         isRealtimeBidirectionalVoiceInputReady = false
+        pendingRealtimeBidirectionalFinishSource = nil
         voiceState = .processing
         wakeWordAudioDucker.restore(reason: "realtime_capture_finished")
 
@@ -3927,6 +4047,7 @@ final class CompanionManager: ObservableObject {
     private func releaseRealtimeVoiceConversationMode(reason: String) {
         isRealtimeBidirectionalVoiceCaptureActive = false
         isRealtimeBidirectionalVoiceInputReady = false
+        pendingRealtimeBidirectionalFinishSource = nil
         realtimeBidirectionalVoiceCaptureStartedAt = nil
         clearVoiceResponseCaption()
         currentAudioPowerLevel = 0
@@ -4457,28 +4578,100 @@ final class CompanionManager: ObservableObject {
             return true
         }
 
-        if let compositeRequest = Self.compositeAppActionRequest(from: transcript) {
+        if let webOpenRequest = Self.webOpenRequest(from: transcript) {
             OpenClickyMessageLogStore.shared.append(
-                lane: "agent",
+                lane: "computer-use",
                 direction: "incoming",
-                event: "openclicky.agent_task.composite_app_action_route",
+                event: "native_cua.direct_request.web_detected",
                 fields: [
                     "source": source,
                     "transcript": transcript,
-                    "executor": "agent_mode",
-                    "route": "agent.composite_app_action",
+                    "executor": "native_cua",
+                    "route": "native_cua.open_url",
+                    "executionMethod": "NSWorkspace.open",
+                    "url": webOpenRequest.url.absoluteString,
+                    "browserAppName": webOpenRequest.browserAppName ?? "",
+                    "requestID": activeRequestTiming?.requestID ?? "none"
+                ]
+            )
+            openRequestedWebsite(webOpenRequest)
+            return true
+        }
+
+        if let compositeRequest = Self.compositeAppActionRequest(from: transcript) {
+            let backend = selectedComputerUseBackend
+            OpenClickyMessageLogStore.shared.append(
+                lane: "computer-use",
+                direction: "incoming",
+                event: "\(backend.executorID).direct_request.composite_app_action_detected",
+                fields: [
+                    "source": source,
+                    "transcript": transcript,
+                    "executor": backend.executorID,
+                    "route": "\(backend.executorID).composite_app_action",
+                    "executionMethod": "live_voice_computer_use_router",
                     "appName": compositeRequest.appName,
                     "actionText": compositeRequest.actionText,
                     "requestID": activeRequestTiming?.requestID ?? "none"
                 ]
             )
-            startVoiceAgentTask(
-                instruction: Self.compositeAppActionAgentInstruction(from: compositeRequest),
-                acknowledgement: "i’ll do the app action, not just open the app.",
-                route: "agent.composite_app_action",
-                voiceContextUserTranscript: transcript
+            if handleSupportedCompositeAppActionRequest(compositeRequest, backend: backend) {
+                return true
+            }
+
+            let executionStartedAt = markRequestExecutionStarted(
+                route: "\(backend.executorID).composite_app_action.unsupported",
+                extra: [
+                    "executor": backend.executorID,
+                    "executionMethod": "live_voice_computer_use_router",
+                    "appName": compositeRequest.appName,
+                    "actionText": compositeRequest.actionText
+                ]
+            )
+            pendingAgentOfferInstruction = Self.compositeAppActionAgentInstruction(from: compositeRequest)
+            pendingAgentOfferAt = Date()
+            let response = "that app action needs Agent Mode. Say: start an agent to \(compositeRequest.instruction)."
+            latestVoiceResponseCard = ClickyResponseCard(
+                source: .voice,
+                rawText: response,
+                contextTitle: compositeRequest.instruction
+            )
+            speakShortSystemResponse(response)
+            markRequestCompleted(
+                route: "\(backend.executorID).composite_app_action.unsupported",
+                executionStartedAt: executionStartedAt,
+                status: "failed",
+                extra: [
+                    "executor": backend.executorID,
+                    "executionMethod": "live_voice_computer_use_router",
+                    "appName": compositeRequest.appName,
+                    "actionText": compositeRequest.actionText,
+                    "error": "No supported live composite app-action executor matched"
+                ]
             )
             return true
+        }
+
+        if let spotifyPlaybackRequest = Self.standaloneSpotifyPlaybackRequest(from: transcript) {
+            let backend = selectedComputerUseBackend
+            OpenClickyMessageLogStore.shared.append(
+                lane: "computer-use",
+                direction: "incoming",
+                event: "\(backend.executorID).direct_request.spotify_playback_detected",
+                fields: [
+                    "source": source,
+                    "transcript": transcript,
+                    "executor": backend.executorID,
+                    "route": "\(backend.executorID).spotify_search_play",
+                    "executionMethod": "live_voice_computer_use_router",
+                    "appName": spotifyPlaybackRequest.appName,
+                    "actionText": spotifyPlaybackRequest.actionText,
+                    "requestID": activeRequestTiming?.requestID ?? "none"
+                ]
+            )
+            if handleSpotifyCompositeAppActionRequest(spotifyPlaybackRequest, backend: backend) {
+                return true
+            }
         }
 
         if let appOpenRequest = Self.localAppOpenRequest(from: transcript) {
@@ -4520,25 +4713,6 @@ final class CompanionManager: ObservableObject {
             } else {
                 _ = openRequestedApplication(appOpenRequest)
             }
-            return true
-        }
-
-        if let webOpenRequest = Self.webOpenRequest(from: transcript) {
-            OpenClickyMessageLogStore.shared.append(
-                lane: "computer-use",
-                direction: "incoming",
-                event: "native_cua.direct_request.web_detected",
-                fields: [
-                    "source": source,
-                    "transcript": transcript,
-                    "executor": "native_cua",
-                    "route": "native_cua.open_url",
-                    "executionMethod": "NSWorkspace.open",
-                    "url": webOpenRequest.url.absoluteString,
-                    "requestID": activeRequestTiming?.requestID ?? "none"
-                ]
-            )
-            openRequestedWebsite(webOpenRequest)
             return true
         }
 
@@ -4774,6 +4948,603 @@ final class CompanionManager: ObservableObject {
                 "browserAppName": request.browserAppName ?? ""
             ]
         )
+    }
+
+    private func handleSupportedCompositeAppActionRequest(
+        _ request: OpenClickyCompositeAppActionRequest,
+        backend: OpenClickyComputerUseBackendID
+    ) -> Bool {
+        if request.appName == "Spotify",
+           handleSpotifyCompositeAppActionRequest(request, backend: backend) {
+            return true
+        }
+
+        if let searchQuery = Self.compositeAppSearchQuery(from: request.actionText) {
+            searchInApplicationUsingSelectedComputerUse(
+                OpenClickyCompositeAppSearchActionRequest(
+                    appName: request.appName,
+                    query: searchQuery,
+                    instruction: request.instruction
+                ),
+                backend: backend
+            )
+            return true
+        }
+
+        if let keyPressRequest = Self.nativeKeyPressRequest(from: request.actionText) {
+            pressKeyInApplicationUsingSelectedComputerUse(
+                keyPressRequest,
+                appName: request.appName,
+                instruction: request.instruction,
+                backend: backend
+            )
+            return true
+        }
+
+        return false
+    }
+
+    private func handleSpotifyCompositeAppActionRequest(
+        _ request: OpenClickyCompositeAppActionRequest,
+        backend: OpenClickyComputerUseBackendID
+    ) -> Bool {
+        if let query = Self.spotifyPlaybackQuery(from: request.actionText) {
+            openSpotifySearchAndPlayTopResult(query: query, request: request, backend: backend)
+            return true
+        }
+
+        if let controlAction = Self.spotifyPlaybackControlAction(from: request.actionText) {
+            runSpotifyPlaybackControl(controlAction, request: request, backend: backend)
+            return true
+        }
+
+        return false
+    }
+
+    private func openSpotifySearchAndPlayTopResult(
+        query: String,
+        request: OpenClickyCompositeAppActionRequest,
+        backend: OpenClickyComputerUseBackendID
+    ) {
+        interruptCurrentVoiceResponse()
+        let timing = activeRequestTiming
+        let route = "\(backend.executorID).spotify_search_play"
+        let executionStartedAt = markRequestExecutionStarted(
+            route: route,
+            timing: timing,
+            extra: [
+                "executor": backend.executorID,
+                "executionMethod": Self.spotifySearchPlayExecutionMethod(for: backend),
+                "controller": backend == .backgroundComputerUse
+                    ? "OpenClickyBackgroundComputerUseController"
+                    : "OpenClickyNativeComputerUseController",
+                "appName": request.appName,
+                "actionText": request.actionText,
+                "query": query
+            ]
+        )
+
+        guard let spotifyURL = Self.spotifySearchURL(for: query),
+              NSWorkspace.shared.open(spotifyURL) else {
+            speakShortSystemResponse("i couldn't open Spotify search for \(query).")
+            markRequestCompleted(
+                route: route,
+                executionStartedAt: executionStartedAt,
+                timing: timing,
+                status: "failed",
+                extra: [
+                    "executor": backend.executorID,
+                    "executionMethod": "NSWorkspace.open_spotify_uri",
+                    "appName": request.appName,
+                    "query": query,
+                    "error": "Spotify search URL could not be opened"
+                ]
+            )
+            return
+        }
+
+        latestVoiceResponseCard = ClickyResponseCard(
+            source: .voice,
+            rawText: "searching Spotify for \(query).",
+            contextTitle: request.instruction
+        )
+        speakShortSystemResponse("searching Spotify for \(query).")
+
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 1_000_000_000)
+            do {
+                try await pressKeyInApplication(
+                    "enter",
+                    modifiers: [],
+                    appName: "Spotify",
+                    backend: backend
+                )
+                OpenClickyMessageLogStore.shared.append(
+                    lane: "computer-use",
+                    direction: "outgoing",
+                    event: "\(backend.executorID).spotify_search_play",
+                    fields: [
+                        "executor": backend.executorID,
+                        "executionMethod": Self.spotifySearchPlayExecutionMethod(for: backend),
+                        "appName": request.appName,
+                        "query": query,
+                        "instruction": request.instruction
+                    ]
+                )
+                markRequestCompleted(
+                    route: route,
+                    executionStartedAt: executionStartedAt,
+                    timing: timing,
+                    extra: [
+                        "executor": backend.executorID,
+                        "executionMethod": Self.spotifySearchPlayExecutionMethod(for: backend),
+                        "appName": request.appName,
+                        "query": query
+                    ]
+                )
+            } catch {
+                OpenClickyMessageLogStore.shared.append(
+                    lane: "computer-use",
+                    direction: "error",
+                    event: "\(backend.executorID).spotify_search_play_error",
+                    fields: [
+                        "executor": backend.executorID,
+                        "executionMethod": Self.spotifySearchPlayExecutionMethod(for: backend),
+                        "appName": request.appName,
+                        "query": query,
+                        "error": error.localizedDescription
+                    ]
+                )
+                markRequestCompleted(
+                    route: route,
+                    executionStartedAt: executionStartedAt,
+                    timing: timing,
+                    status: "failed",
+                    extra: [
+                        "executor": backend.executorID,
+                        "executionMethod": Self.spotifySearchPlayExecutionMethod(for: backend),
+                        "appName": request.appName,
+                        "query": query,
+                        "error": error.localizedDescription
+                    ]
+                )
+            }
+        }
+    }
+
+    private func runSpotifyPlaybackControl(
+        _ action: OpenClickySpotifyPlaybackControlAction,
+        request: OpenClickyCompositeAppActionRequest,
+        backend: OpenClickyComputerUseBackendID
+    ) {
+        interruptCurrentVoiceResponse()
+        let timing = activeRequestTiming
+        let route = "native_cua.spotify_playback_control"
+        let executionStartedAt = markRequestExecutionStarted(
+            route: route,
+            timing: timing,
+            extra: [
+                "executor": "native_cua",
+                "selectedComputerUseBackend": backend.rawValue,
+                "executionMethod": "OpenClickyLocalAutomationRunner.runAppleScript",
+                "controller": "/usr/bin/osascript",
+                "appName": request.appName,
+                "action": action.rawValue
+            ]
+        )
+
+        let appleScriptCommand: String
+        let acknowledgement: String
+        switch action {
+        case .play:
+            appleScriptCommand = "play"
+            acknowledgement = "playing Spotify."
+        case .pause:
+            appleScriptCommand = "pause"
+            acknowledgement = "paused Spotify."
+        case .playPause:
+            appleScriptCommand = "playpause"
+            acknowledgement = "toggled Spotify playback."
+        case .next:
+            appleScriptCommand = "next track"
+            acknowledgement = "skipped Spotify."
+        case .previous:
+            appleScriptCommand = "previous track"
+            acknowledgement = "went back in Spotify."
+        }
+
+        let script = """
+        tell application "Spotify"
+            activate
+            \(appleScriptCommand)
+        end tell
+        """
+
+        Task { @MainActor in
+            let result = await Task.detached(priority: .userInitiated) {
+                OpenClickyLocalAutomationRunner.runAppleScript(script)
+            }.value
+            let output = result.output.trimmingCharacters(in: .whitespacesAndNewlines)
+            let errorOutput = result.errorOutput.trimmingCharacters(in: .whitespacesAndNewlines)
+            if result.terminationStatus == 0 {
+                latestVoiceResponseCard = ClickyResponseCard(
+                    source: .voice,
+                    rawText: acknowledgement,
+                    contextTitle: request.instruction
+                )
+                speakShortSystemResponse(acknowledgement)
+                OpenClickyMessageLogStore.shared.append(
+                    lane: "computer-use",
+                    direction: "outgoing",
+                    event: "native_cua.spotify_playback_control",
+                    fields: [
+                        "executor": "native_cua",
+                        "executionMethod": "OpenClickyLocalAutomationRunner.runAppleScript",
+                        "controller": "/usr/bin/osascript",
+                        "appName": request.appName,
+                        "action": action.rawValue,
+                        "output": output
+                    ]
+                )
+                markRequestCompleted(
+                    route: route,
+                    executionStartedAt: executionStartedAt,
+                    timing: timing,
+                    extra: [
+                        "executor": "native_cua",
+                        "executionMethod": "OpenClickyLocalAutomationRunner.runAppleScript",
+                        "controller": "/usr/bin/osascript",
+                        "appName": request.appName,
+                        "action": action.rawValue
+                    ]
+                )
+            } else {
+                let errorText = errorOutput.isEmpty ? "Spotify automation failed." : errorOutput
+                speakShortSystemResponse("Spotify hit a blocker: \(errorText)")
+                OpenClickyMessageLogStore.shared.append(
+                    lane: "computer-use",
+                    direction: "error",
+                    event: "native_cua.spotify_playback_control_error",
+                    fields: [
+                        "executor": "native_cua",
+                        "executionMethod": "OpenClickyLocalAutomationRunner.runAppleScript",
+                        "controller": "/usr/bin/osascript",
+                        "appName": request.appName,
+                        "action": action.rawValue,
+                        "error": errorText
+                    ]
+                )
+                markRequestCompleted(
+                    route: route,
+                    executionStartedAt: executionStartedAt,
+                    timing: timing,
+                    status: "failed",
+                    extra: [
+                        "executor": "native_cua",
+                        "executionMethod": "OpenClickyLocalAutomationRunner.runAppleScript",
+                        "controller": "/usr/bin/osascript",
+                        "appName": request.appName,
+                        "action": action.rawValue,
+                        "error": errorText
+                    ]
+                )
+            }
+        }
+    }
+
+    private func searchInApplicationUsingSelectedComputerUse(
+        _ request: OpenClickyCompositeAppSearchActionRequest,
+        backend: OpenClickyComputerUseBackendID
+    ) {
+        interruptCurrentVoiceResponse()
+        let timing = activeRequestTiming
+        let route = "\(backend.executorID).composite_app_search"
+        let executionStartedAt = markRequestExecutionStarted(
+            route: route,
+            timing: timing,
+            extra: [
+                "executor": backend.executorID,
+                "executionMethod": backend == .backgroundComputerUse
+                    ? "BackgroundComputerUse /v1/press_key + /v1/type_text"
+                    : "OpenClickyNativeComputerUseController.pressKey/typeText",
+                "controller": backend == .backgroundComputerUse
+                    ? "OpenClickyBackgroundComputerUseController"
+                    : "OpenClickyNativeComputerUseController",
+                "appName": request.appName,
+                "query": request.query
+            ]
+        )
+
+        let appRequest = OpenClickyAppOpenRequest(
+            appName: request.appName,
+            instruction: "Open \(request.appName)."
+        )
+        guard openRequestedApplication(appRequest, shouldSpeak: false, logTiming: false) else {
+            speakShortSystemResponse("i couldn't open \(request.appName) for that search.")
+            markRequestCompleted(
+                route: route,
+                executionStartedAt: executionStartedAt,
+                timing: timing,
+                status: "failed",
+                extra: [
+                    "executor": backend.executorID,
+                    "executionMethod": "launchApplication(named:)",
+                    "appName": request.appName,
+                    "query": request.query,
+                    "error": "Application could not be opened"
+                ]
+            )
+            return
+        }
+
+        latestVoiceResponseCard = ClickyResponseCard(
+            source: .voice,
+            rawText: "searching \(request.appName) for \(request.query).",
+            contextTitle: request.instruction
+        )
+        speakShortSystemResponse("searching \(request.appName) for \(request.query).")
+
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 650_000_000)
+            do {
+                try await pressKeyInApplication("f", modifiers: ["command"], appName: request.appName, backend: backend)
+                try? await Task.sleep(nanoseconds: 150_000_000)
+                try await pressKeyInApplication("a", modifiers: ["command"], appName: request.appName, backend: backend)
+                try await typeTextInApplication(request.query, appName: request.appName, backend: backend)
+                OpenClickyMessageLogStore.shared.append(
+                    lane: "computer-use",
+                    direction: "outgoing",
+                    event: "\(backend.executorID).composite_app_search",
+                    fields: [
+                        "executor": backend.executorID,
+                        "executionMethod": backend == .backgroundComputerUse
+                            ? "BackgroundComputerUse /v1/press_key + /v1/type_text"
+                            : "OpenClickyNativeComputerUseController.pressKey/typeText",
+                        "appName": request.appName,
+                        "query": request.query,
+                        "instruction": request.instruction
+                    ]
+                )
+                markRequestCompleted(
+                    route: route,
+                    executionStartedAt: executionStartedAt,
+                    timing: timing,
+                    extra: [
+                        "executor": backend.executorID,
+                        "executionMethod": backend == .backgroundComputerUse
+                            ? "BackgroundComputerUse /v1/press_key + /v1/type_text"
+                            : "OpenClickyNativeComputerUseController.pressKey/typeText",
+                        "appName": request.appName,
+                        "query": request.query
+                    ]
+                )
+            } catch {
+                OpenClickyMessageLogStore.shared.append(
+                    lane: "computer-use",
+                    direction: "error",
+                    event: "\(backend.executorID).composite_app_search_error",
+                    fields: [
+                        "executor": backend.executorID,
+                        "executionMethod": backend == .backgroundComputerUse
+                            ? "BackgroundComputerUse /v1/press_key + /v1/type_text"
+                            : "OpenClickyNativeComputerUseController.pressKey/typeText",
+                        "appName": request.appName,
+                        "query": request.query,
+                        "error": error.localizedDescription
+                    ]
+                )
+                markRequestCompleted(
+                    route: route,
+                    executionStartedAt: executionStartedAt,
+                    timing: timing,
+                    status: "failed",
+                    extra: [
+                        "executor": backend.executorID,
+                        "executionMethod": backend == .backgroundComputerUse
+                            ? "BackgroundComputerUse /v1/press_key + /v1/type_text"
+                            : "OpenClickyNativeComputerUseController.pressKey/typeText",
+                        "appName": request.appName,
+                        "query": request.query,
+                        "error": error.localizedDescription
+                    ]
+                )
+            }
+        }
+    }
+
+    private func pressKeyInApplicationUsingSelectedComputerUse(
+        _ request: OpenClickyNativeKeyPressRequest,
+        appName: String,
+        instruction: String,
+        backend: OpenClickyComputerUseBackendID
+    ) {
+        interruptCurrentVoiceResponse()
+        let timing = activeRequestTiming
+        let route = "\(backend.executorID).composite_app_key"
+        let executionStartedAt = markRequestExecutionStarted(
+            route: route,
+            timing: timing,
+            extra: [
+                "executor": backend.executorID,
+                "executionMethod": backend == .backgroundComputerUse
+                    ? "BackgroundComputerUse /v1/press_key"
+                    : "OpenClickyNativeComputerUseController.pressKey",
+                "controller": backend == .backgroundComputerUse
+                    ? "OpenClickyBackgroundComputerUseController"
+                    : "OpenClickyNativeComputerUseController",
+                "appName": appName,
+                "key": request.key,
+                "modifiers": request.modifiers.joined(separator: ",")
+            ]
+        )
+
+        let appRequest = OpenClickyAppOpenRequest(
+            appName: appName,
+            instruction: "Open \(appName)."
+        )
+        guard openRequestedApplication(appRequest, shouldSpeak: false, logTiming: false) else {
+            speakShortSystemResponse("i couldn't open \(appName) for that key press.")
+            markRequestCompleted(
+                route: route,
+                executionStartedAt: executionStartedAt,
+                timing: timing,
+                status: "failed",
+                extra: [
+                    "executor": backend.executorID,
+                    "executionMethod": "launchApplication(named:)",
+                    "appName": appName,
+                    "key": request.key,
+                    "error": "Application could not be opened"
+                ]
+            )
+            return
+        }
+
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 650_000_000)
+            do {
+                try await pressKeyInApplication(
+                    request.key,
+                    modifiers: request.modifiers,
+                    appName: appName,
+                    backend: backend
+                )
+                let modifierText = request.modifiers.isEmpty ? "" : request.modifiers.joined(separator: " ") + " "
+                let acknowledgement = "pressed \(modifierText)\(request.key) in \(appName)."
+                latestVoiceResponseCard = ClickyResponseCard(
+                    source: .voice,
+                    rawText: acknowledgement,
+                    contextTitle: instruction
+                )
+                speakShortSystemResponse(acknowledgement)
+                OpenClickyMessageLogStore.shared.append(
+                    lane: "computer-use",
+                    direction: "outgoing",
+                    event: "\(backend.executorID).composite_app_key",
+                    fields: [
+                        "executor": backend.executorID,
+                        "executionMethod": backend == .backgroundComputerUse
+                            ? "BackgroundComputerUse /v1/press_key"
+                            : "OpenClickyNativeComputerUseController.pressKey",
+                        "appName": appName,
+                        "key": request.key,
+                        "modifiers": request.modifiers.joined(separator: ",")
+                    ]
+                )
+                markRequestCompleted(
+                    route: route,
+                    executionStartedAt: executionStartedAt,
+                    timing: timing,
+                    extra: [
+                        "executor": backend.executorID,
+                        "executionMethod": backend == .backgroundComputerUse
+                            ? "BackgroundComputerUse /v1/press_key"
+                            : "OpenClickyNativeComputerUseController.pressKey",
+                        "appName": appName,
+                        "key": request.key,
+                        "modifiers": request.modifiers.joined(separator: ",")
+                    ]
+                )
+            } catch {
+                speakShortSystemResponse("\(appName) key press hit a blocker: \(error.localizedDescription)")
+                markRequestCompleted(
+                    route: route,
+                    executionStartedAt: executionStartedAt,
+                    timing: timing,
+                    status: "failed",
+                    extra: [
+                        "executor": backend.executorID,
+                        "executionMethod": backend == .backgroundComputerUse
+                            ? "BackgroundComputerUse /v1/press_key"
+                            : "OpenClickyNativeComputerUseController.pressKey",
+                        "appName": appName,
+                        "key": request.key,
+                        "error": error.localizedDescription
+                    ]
+                )
+            }
+        }
+    }
+
+    private func pressKeyInApplication(
+        _ key: String,
+        modifiers: [String],
+        appName: String,
+        backend: OpenClickyComputerUseBackendID
+    ) async throws {
+        switch backend {
+        case .backgroundComputerUse:
+            _ = try await backgroundComputerUseController.pressKey(
+                key,
+                modifiers: modifiers,
+                targetAppName: appName
+            )
+        case .nativeSwift:
+            if !nativeComputerUseController.isEnabled {
+                nativeComputerUseController.setEnabled(true)
+            }
+            Self.activateRunningApplication(named: appName)
+            guard let targetWindow = await waitForNativeComputerUseWindow(for: appName) else {
+                throw NSError(
+                    domain: "OpenClickyCompositeAppAction",
+                    code: -1,
+                    userInfo: [NSLocalizedDescriptionKey: "No \(appName) window available"]
+                )
+            }
+            try nativeComputerUseController.pressKey(key, modifiers: modifiers, toPid: targetWindow.pid)
+        }
+    }
+
+    private func typeTextInApplication(
+        _ text: String,
+        appName: String,
+        backend: OpenClickyComputerUseBackendID
+    ) async throws {
+        switch backend {
+        case .backgroundComputerUse:
+            _ = try await backgroundComputerUseController.typeText(text, targetAppName: appName)
+        case .nativeSwift:
+            if !nativeComputerUseController.isEnabled {
+                nativeComputerUseController.setEnabled(true)
+            }
+            Self.activateRunningApplication(named: appName)
+            guard let targetWindow = await waitForNativeComputerUseWindow(for: appName) else {
+                throw NSError(
+                    domain: "OpenClickyCompositeAppAction",
+                    code: -1,
+                    userInfo: [NSLocalizedDescriptionKey: "No \(appName) window available"]
+                )
+            }
+            try nativeComputerUseController.typeText(text, delayMilliseconds: 8, toPid: targetWindow.pid)
+        }
+    }
+
+    private func nativeComputerUseWindow(for appName: String) -> OpenClickyComputerUseWindowInfo? {
+        let windows = nativeComputerUseController.visibleWindows()
+        if let matchingWindow = windows.first(where: { Self.applicationOwner($0.owner, matches: appName) }) {
+            return matchingWindow
+        }
+        if let focusedWindow = nativeComputerUseController.refreshFocusedTarget(),
+           Self.applicationOwner(focusedWindow.owner, matches: appName) {
+            return focusedWindow
+        }
+        return nil
+    }
+
+    private func waitForNativeComputerUseWindow(
+        for appName: String,
+        timeout: TimeInterval = 3.0,
+        pollIntervalNanoseconds: UInt64 = 150_000_000
+    ) async -> OpenClickyComputerUseWindowInfo? {
+        let deadline = Date().addingTimeInterval(timeout)
+        repeat {
+            if let targetWindow = nativeComputerUseWindow(for: appName) {
+                return targetWindow
+            }
+            guard Date() < deadline else { break }
+            try? await Task.sleep(nanoseconds: pollIntervalNanoseconds)
+        } while !Task.isCancelled
+        return nativeComputerUseWindow(for: appName)
     }
 
     @discardableResult
@@ -5155,6 +5926,10 @@ final class CompanionManager: ObservableObject {
     private func clickUsingNativeComputerUse(_ request: OpenClickyNativeClickRequest) {
         interruptCurrentVoiceResponse()
         let timing = activeRequestTiming
+        let pointingResolver = Self.computerUsePointingResolver(
+            selectedVoiceModelID: selectedModel,
+            selectedComputerUseModelID: selectedComputerUseModel
+        )
         let executionStartedAt = markRequestExecutionStarted(
             route: "native_cua.click",
             timing: timing,
@@ -5163,7 +5938,9 @@ final class CompanionManager: ObservableObject {
                 "executionMethod": "OpenClickyNativeComputerUseController.click",
                 "controller": "OpenClickyNativeComputerUseController",
                 "targetPhrase": request.targetPhrase ?? "",
-                "prefersLastPointedElement": request.prefersLastPointedElement
+                "prefersLastPointedElement": request.prefersLastPointedElement,
+                "pointingResolver": pointingResolver.rawValue,
+                "pointingModel": pointingResolver == .openAIRealtime ? selectedModel : selectedComputerUseModel
             ]
         )
 
@@ -7489,8 +8266,11 @@ final class CompanionManager: ObservableObject {
         return nil
     }
 
-    private static func isCancelAllAgentTasksRequest(_ transcript: String) -> Bool {
+    static func isCancelAllAgentTasksRequest(_ transcript: String) -> Bool {
         let normalizedTranscript = normalizedSpokenCommandText(transcript)
+        if isAgentDelegationRequest(normalizedTranscript) {
+            return false
+        }
         let phrases = [
             "cancel all tasks",
             "cancel all task",
@@ -7512,8 +8292,11 @@ final class CompanionManager: ObservableObject {
         return phrases.contains { normalizedTranscript.contains($0) }
     }
 
-    private static func isCancelCurrentAgentTaskRequest(_ transcript: String) -> Bool {
+    static func isCancelCurrentAgentTaskRequest(_ transcript: String) -> Bool {
         let normalizedTranscript = normalizedSpokenCommandText(transcript)
+        if isAgentDelegationRequest(normalizedTranscript) {
+            return false
+        }
         let phrases = [
             "cancel that",
             "cancel this",
@@ -7546,6 +8329,29 @@ final class CompanionManager: ObservableObject {
 
         let explicitAgentStopPattern = #"\b(?:cancel|stop|kill|dismiss)\b.{0,28}\b(?:agent|task|codex|background\s+task)\b"#
         return normalizedTranscript.range(of: explicitAgentStopPattern, options: .regularExpression) != nil
+    }
+
+    private static func isAgentDelegationRequest(_ normalizedTranscript: String) -> Bool {
+        let delegationPhrases = [
+            "get another agent",
+            "start another agent",
+            "spin up another agent",
+            "launch another agent",
+            "get an agent",
+            "start an agent",
+            "spin up an agent",
+            "launch an agent",
+            "have an agent",
+            "ask an agent",
+            "new agent",
+            "another agent to",
+            "agent to look",
+            "agent look at",
+            "agent to check",
+            "agent to investigate",
+            "agent to fix"
+        ]
+        return delegationPhrases.contains { normalizedTranscript.contains($0) }
     }
 
     private static func explicitNewTaskInstruction(from transcript: String) -> String? {
@@ -8695,12 +9501,26 @@ final class CompanionManager: ObservableObject {
         guard !candidate.isEmpty else { return nil }
         guard !isExplicitAgentRoutingCandidate(candidate) else { return nil }
 
-        let patterns = [
-            #"(?i)^\s*(?:(?:can|could|would|will)\s+you\s+)?(?:please\s+)?(?:open|launch|start|switch\s+to)\s+(?:up\s+)?(.+?)\s+(?:and|then)\s+(?:(?:can|could|would|will)\s+you\s+)?(?:please\s+)?(.+?)(?:\s+for\s+me)?[\.\!\?]*\s*$"#,
-            #"(?i)^\s*(?:(?:can|could|would|will)\s+you\s+)?(?:please\s+)?(?:open|launch|start|switch\s+to)\s+(?:up\s+)?(.+?)\s+to\s+(.+?)(?:\s+for\s+me)?[\.\!\?]*\s*$"#
+        let patterns: [(pattern: String, requiresKnownApp: Bool, requiresActionVerb: Bool)] = [
+            (
+                #"(?i)^\s*(?:(?:can|could|would|will)\s+you\s+)?(?:please\s+)?(?:open|launch|start|switch\s+to)\s+(?:up\s+)?(.+?)\s+(?:and|then)\s+(?:(?:can|could|would|will)\s+you\s+)?(?:please\s+)?(.+?)(?:\s+for\s+me)?[\.\!\?]*\s*$"#,
+                false,
+                false
+            ),
+            (
+                #"(?i)^\s*(?:(?:can|could|would|will)\s+you\s+)?(?:please\s+)?(?:open|launch|start|switch\s+to)\s+(?:up\s+)?(.+?)\s+to\s+(.+?)(?:\s+for\s+me)?[\.\!\?]*\s*$"#,
+                false,
+                false
+            ),
+            (
+                #"(?i)^\s*(?:(?:can|could|would|will)\s+you\s+)?(?:please\s+)?(.+?)\s+(?:and|then)\s+(?:(?:can|could|would|will)\s+you\s+)?(?:please\s+)?(.+?)(?:\s+for\s+me)?[\.\!\?]*\s*$"#,
+                true,
+                true
+            )
         ]
 
-        for pattern in patterns {
+        for compositePattern in patterns {
+            let pattern = compositePattern.pattern
             guard let regex = try? NSRegularExpression(pattern: pattern) else { continue }
             let range = NSRange(candidate.startIndex..<candidate.endIndex, in: candidate)
             guard let match = regex.firstMatch(in: candidate, range: range),
@@ -8714,6 +9534,9 @@ final class CompanionManager: ObservableObject {
             let appName = normalizedApplicationName(from: rawAppName)
             guard !appName.isEmpty,
                   !actionText.isEmpty,
+                  !isContaminatedCompositeAppName(rawAppName),
+                  (!compositePattern.requiresKnownApp || isKnownBareLocalApplicationName(appName)),
+                  (!compositePattern.requiresActionVerb || hasDirectCompositeActionVerb(actionText)),
                   !isReservedAgentOpenTarget(rawAppName),
                   !isLocalAppOpenPlaceholder(appName),
                   !isLikelyFileOrFolderOpenTarget(rawAppName),
@@ -8748,6 +9571,158 @@ final class CompanionManager: ObservableObject {
         return normalized.range(of: pattern, options: .regularExpression) != nil
     }
 
+    private static func isContaminatedCompositeAppName(_ rawAppName: String) -> Bool {
+        let normalized = normalizedSpokenCommandText(rawAppName)
+        let pattern = #"\b(?:and|then)\s+(?:go|navigate|browse|visit|open|play|search|find|look\s+up|type|write|enter|press|hit|click|tap|select|choose)\b"#
+        return normalized.range(of: pattern, options: .regularExpression) != nil
+    }
+
+    private static func hasDirectCompositeActionVerb(_ actionText: String) -> Bool {
+        let normalized = normalizedSpokenCommandText(actionText)
+        let pattern = #"^(?:play|pause|resume|skip|next|previous|search|find|look\s+up|type|write|enter|press|hit|click|tap|select|choose|go\s+to|navigate\s+to|browse\s+to|visit)\b"#
+        return normalized.range(of: pattern, options: .regularExpression) != nil
+    }
+
+    private static func compositeAppSearchQuery(from actionText: String) -> String? {
+        let candidate = cleanedCompositeAppActionText(actionText)
+        let patterns = [
+            #"(?i)^\s*(?:search|find|look\s+up)\s+(?:for\s+)?(.+?)(?:\s+in\s+(?:the\s+)?(?:app|application|window))?[\.\!\?]*\s*$"#
+        ]
+
+        for pattern in patterns {
+            guard let regex = try? NSRegularExpression(pattern: pattern) else { continue }
+            let range = NSRange(candidate.startIndex..<candidate.endIndex, in: candidate)
+            guard let match = regex.firstMatch(in: candidate, range: range),
+                  let queryRange = Range(match.range(at: 1), in: candidate) else {
+                continue
+            }
+            let query = cleanedCompositeActionPayload(String(candidate[queryRange]))
+            guard !query.isEmpty else { continue }
+            return query
+        }
+
+        return nil
+    }
+
+    private static func spotifyPlaybackQuery(from actionText: String) -> String? {
+        let candidate = cleanedCompositeAppActionText(actionText)
+        let patterns = [
+            #"(?i)^\s*(?:play|put\s+on)\s+(?:the\s+)?(?:(?:song|track|album|artist)\s+)?(.+?)(?:\s+on\s+spotify)?[\.\!\?]*\s*$"#
+        ]
+
+        for pattern in patterns {
+            guard let regex = try? NSRegularExpression(pattern: pattern) else { continue }
+            let range = NSRange(candidate.startIndex..<candidate.endIndex, in: candidate)
+            guard let match = regex.firstMatch(in: candidate, range: range),
+                  let queryRange = Range(match.range(at: 1), in: candidate) else {
+                continue
+            }
+            let query = cleanedCompositeActionPayload(String(candidate[queryRange]))
+            let normalized = normalizedSpokenCommandText(query)
+            guard !query.isEmpty,
+                  !["something", "music", "a song", "the song", "anything"].contains(normalized) else {
+                continue
+            }
+            return query
+        }
+
+        return nil
+    }
+
+    private static func standaloneSpotifyPlaybackRequest(from transcript: String) -> OpenClickyCompositeAppActionRequest? {
+        let candidate = normalizedCommandCandidate(from: transcript)
+        guard !candidate.isEmpty,
+              !isExplicitAgentRoutingCandidate(candidate),
+              compositeAppActionRequest(from: candidate) == nil else {
+            return nil
+        }
+
+        let actionText = cleanedCompositeAppActionText(candidate)
+        if let query = spotifyPlaybackQuery(from: actionText),
+           !isAmbiguousStandaloneSpotifyPlaybackQuery(query) {
+            return OpenClickyCompositeAppActionRequest(
+                appName: "Spotify",
+                actionText: actionText,
+                instruction: candidate
+            )
+        }
+
+        if spotifyPlaybackControlAction(from: actionText) != nil {
+            return OpenClickyCompositeAppActionRequest(
+                appName: "Spotify",
+                actionText: actionText,
+                instruction: candidate
+            )
+        }
+
+        return nil
+    }
+
+    private static func isAmbiguousStandaloneSpotifyPlaybackQuery(_ query: String) -> Bool {
+        let normalized = normalizedSpokenCommandText(query)
+        let ambiguousTargets: Set<String> = [
+            "it",
+            "that",
+            "this",
+            "video",
+            "the video",
+            "movie",
+            "the movie",
+            "episode",
+            "the episode",
+            "clip",
+            "the clip",
+            "youtube",
+            "youtube video"
+        ]
+        return ambiguousTargets.contains(normalized)
+    }
+
+    private static func spotifyPlaybackControlAction(from actionText: String) -> OpenClickySpotifyPlaybackControlAction? {
+        let normalized = normalizedSpokenCommandText(cleanedCompositeAppActionText(actionText))
+        switch normalized {
+        case "play", "resume", "start playing", "keep playing":
+            return .play
+        case "pause", "stop", "stop playing":
+            return .pause
+        case "play pause", "playpause", "toggle playback":
+            return .playPause
+        case "skip", "next", "next song", "next track":
+            return .next
+        case "back", "previous", "previous song", "previous track", "last song", "last track":
+            return .previous
+        default:
+            return nil
+        }
+    }
+
+    private static func spotifySearchURL(for query: String) -> URL? {
+        let allowed = CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~")
+        let encoded = query.addingPercentEncoding(withAllowedCharacters: allowed) ?? ""
+        guard !encoded.isEmpty else { return nil }
+        return URL(string: "spotify:search:\(encoded)")
+    }
+
+    private static func spotifySearchPlayExecutionMethod(for backend: OpenClickyComputerUseBackendID) -> String {
+        switch backend {
+        case .backgroundComputerUse:
+            return "NSWorkspace.open_spotify_uri + BackgroundComputerUse /v1/press_key"
+        case .nativeSwift:
+            return "NSWorkspace.open_spotify_uri + OpenClickyNativeComputerUseController.pressKey"
+        }
+    }
+
+    private static func cleanedCompositeActionPayload(_ rawPayload: String) -> String {
+        var payload = rawPayload.trimmingCharacters(in: CharacterSet(charactersIn: " \n\t.,:;!?"))
+        payload = stripMatchingQuotes(from: payload)
+        payload = payload.replacingOccurrences(
+            of: #"(?i)\s+(?:please|for\s+me)$"#,
+            with: "",
+            options: .regularExpression
+        )
+        return payload.trimmingCharacters(in: CharacterSet(charactersIn: " \n\t.,:;!?"))
+    }
+
     private static func compositeAppActionAgentInstruction(from request: OpenClickyCompositeAppActionRequest) -> String {
         "Use OpenClicky's available app automation, installed skills/connectors, or selected computer-use path to complete this full app action. Open \(request.appName) if needed, then perform this action in \(request.appName): \(request.actionText). Do not report success after only opening the app. Original request: \(request.instruction)"
     }
@@ -8756,6 +9731,7 @@ final class CompanionManager: ObservableObject {
         let trimmedTranscript = normalizedCommandCandidate(from: transcript)
         guard !trimmedTranscript.isEmpty else { return nil }
         guard !isExplicitAgentRoutingCandidate(trimmedTranscript) else { return nil }
+        guard compositeAppActionRequest(from: trimmedTranscript) == nil else { return nil }
 
         let pattern = #"(?i)^\s*(?:(?:can|could|would|will)\s+you\s+)?(?:please\s+)?(?:(?:ask|tell)\s+(?:an?\s+|the\s+)?agent\s+to\s+)?(?:open|launch|start|switch\s+to)\s+(?:up\s+)?(.+?)(?:\s+for\s+me)?[\.\!\?]*\s*$"#
         if let regex = try? NSRegularExpression(pattern: pattern),
@@ -10265,6 +11241,8 @@ final class CompanionManager: ObservableObject {
             return ["com.apple.iCal"]
         case "Slack":
             return ["com.tinyspeck.slackmacgap"]
+        case "Spotify":
+            return ["com.spotify.client"]
         case "GitHub Desktop":
             return ["com.github.GitHubClient"]
         default:
@@ -10283,6 +11261,14 @@ final class CompanionManager: ObservableObject {
                 return
             }
         }
+    }
+
+    private static func applicationOwner(_ owner: String, matches appName: String) -> Bool {
+        let normalizedOwner = normalizedApplicationName(from: owner)
+        if normalizedOwner == appName { return true }
+        let foldedOwner = owner.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current).lowercased()
+        let foldedApp = appName.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current).lowercased()
+        return foldedOwner == foldedApp
     }
 
     private static func standardApplicationURL(named appName: String) -> URL? {
@@ -10317,7 +11303,7 @@ final class CompanionManager: ObservableObject {
         acknowledgement: String? = nil,
         route: String = "agent.start",
         speakAcknowledgement: Bool = true,
-        interruptVoiceResponse: Bool = true,
+        interruptVoiceResponse: Bool = false,
         voiceContextUserTranscript: String? = nil
     ) {
         // Note: when the user explicitly said "agent" we do NOT route
@@ -10354,7 +11340,7 @@ final class CompanionManager: ObservableObject {
                 "instructionLength": instruction.count
             ]
         )
-        if interruptVoiceResponse {
+        if interruptVoiceResponse && !voiceTTSClient.isPlaying && !openAIRealtimeSpeechClient.isPlaying && !deepgramVoiceAgentClient.isPlaying {
             interruptCurrentVoiceResponse()
         }
         ensureCursorOverlayVisibleForAgentTask()
@@ -10485,6 +11471,7 @@ final class CompanionManager: ObservableObject {
             try? await Task.sleep(nanoseconds: 350_000_000)
 
             currentResponseTask = Task { [acknowledgement, dockItemID] in
+                guard await self.waitForSystemAnnouncementSlot(sessionID: nil, maxWaitSeconds: 8.0) else { return }
                 await MainActor.run { self.voiceState = .processing }
                 do {
                     try await voiceTTSClient.speakText(acknowledgement) {
@@ -11885,6 +12872,7 @@ final class CompanionManager: ObservableObject {
         realtimeBidirectionalVoiceTurnGeneration &+= 1
         isRealtimeBidirectionalVoiceCaptureActive = false
         isRealtimeBidirectionalVoiceInputReady = false
+        pendingRealtimeBidirectionalFinishSource = nil
         codexVoiceSession.cancelActiveTurn(reason: "voice_response_interrupted")
         openAIRealtimeSpeechClient.stopPlayback()
         deepgramVoiceAgentClient.stopPlayback()
@@ -12559,7 +13547,15 @@ final class CompanionManager: ObservableObject {
         rememberMainConversationUserPrompt(transcript, source: "voice_response")
         interruptCurrentVoiceResponse()
         let timing = activeRequestTiming
-        var executionFields = voiceResponseExecutionFields()
+        let plannedVoiceAnalysisModelID: String? = {
+            let selectedVoiceResponseModel = OpenClickyModelCatalog.voiceResponseModel(withID: selectedModel)
+            guard OpenClickyModelCatalog.isSpeechModelID(selectedVoiceResponseModel.id),
+                  Self.shouldAttachScreenContext(to: transcript) else {
+                return nil
+            }
+            return OpenClickyModelCatalog.voiceAnalysisModel(withID: selectedVoiceResponseModel.id).id
+        }()
+        var executionFields = voiceResponseExecutionFields(effectiveModelID: plannedVoiceAnalysisModelID)
         executionFields["transcriptLength"] = transcript.count
         let executionStartedAt = markRequestExecutionStarted(
             route: "voice.response",
@@ -12574,7 +13570,7 @@ final class CompanionManager: ObservableObject {
         currentVoiceResponseCancellationHandler = { [weak self] reason in
             guard let self, !completionState.didComplete else { return }
             completionState.didComplete = true
-            var completionFields = self.voiceResponseExecutionFields()
+            var completionFields = self.voiceResponseExecutionFields(effectiveModelID: plannedVoiceAnalysisModelID)
             completionFields["cancelledAt"] = reason
             completionFields["audioPlaybackState"] = "interrupted"
             self.markRequestCompleted(
@@ -12605,7 +13601,7 @@ final class CompanionManager: ObservableObject {
                         self.currentVoiceResponseCompletionToken = nil
                     }
                     self.scheduleVoiceResponseCaptionClear()
-                    var completionFields = self.voiceResponseExecutionFields()
+                    var completionFields = self.voiceResponseExecutionFields(effectiveModelID: plannedVoiceAnalysisModelID)
                     extra.forEach { completionFields[$0.key] = $0.value }
                     self.markRequestCompleted(
                         route: "voice.response",
@@ -12681,7 +13677,7 @@ final class CompanionManager: ObservableObject {
                 let hasVisualContext = !labeledImages.isEmpty
                 let isRealtimeResponseModel = OpenClickyModelCatalog.isSpeechModelID(self.selectedModel)
                 let visualAnalysisModelID = isRealtimeResponseModel && hasVisualContext
-                    ? OpenClickyModelCatalog.defaultVoiceResponseModelID
+                    ? OpenClickyModelCatalog.voiceAnalysisModel(withID: self.selectedModel).id
                     : self.selectedModel
 
                 // Realtime speech turns are audio-first. They do not currently
@@ -12778,9 +13774,15 @@ final class CompanionManager: ObservableObject {
                 let shouldUseFiller = Self.shouldUsePreResponseFiller(
                     transcript: transcript,
                     screenContextNeeded: hasVisualContext,
-                    modelProvider: OpenClickyModelCatalog.voiceResponseModel(withID: visualAnalysisModelID).provider
+                    modelProvider: OpenClickyModelCatalog.voiceResponseModel(withID: visualAnalysisModelID).provider,
+                    ttsProvider: self.selectedTTSProvider
                 )
-                let chosenFiller = shouldUseFiller ? FillerPhraseLibrary.shared.randomFiller() : nil
+                let chosenFiller = shouldUseFiller
+                    ? FillerPhraseLibrary.shared.contextualFiller(
+                        for: transcript,
+                        screenContextNeeded: hasVisualContext
+                    )
+                    : nil
                 let voiceSystemPrompt: String = {
                     let base = currentVoiceResponseSystemPrompt()
                     guard let chosenFiller else { return base }
@@ -12789,13 +13791,15 @@ final class CompanionManager: ObservableObject {
 
                     OPENER ALREADY SPOKEN:
                     The user has already heard you say: "\(chosenFiller.phrase)" — that audio plays the instant they release the push-to-talk key, before you have produced a single token. Your reply will be appended directly after it, so write a NATURAL CONTINUATION:
-                    - Do NOT repeat or paraphrase the opener (no "one moment", "give me a second", "working on it", "checking now", "okay", "alright", "got it", "let's see").
+                    - Do NOT repeat or paraphrase the opener (no "one moment", "give me a second", "let me check", "take a look", "that makes sense", "working on it", "checking now", "okay", "alright", "got it", "let's see").
                     - Start with the substance, not a greeting. The first words you generate should be the next words the user hears after the opener.
                     """
                 }()
 
                 let modelStartedAt = Date()
-                var modelResponseFields = self.voiceResponseExecutionFields()
+                var modelResponseFields = self.voiceResponseExecutionFields(
+                    effectiveModelID: visualAnalysisModelID == self.selectedModel ? nil : visualAnalysisModelID
+                )
                 if visualAnalysisModelID != self.selectedModel {
                     modelResponseFields["visualAnalysisModel"] = visualAnalysisModelID
                     modelResponseFields["realtimeVisualPathOverride"] = true
@@ -12823,18 +13827,21 @@ final class CompanionManager: ObservableObject {
                             "executionMethod": self.activeTTSExecutionMethodBeginStreaming,
                             "controller": self.activeTTSControllerName,
                             "preResponseFillerUsed": chosenFiller != nil,
-                            "preResponseFillerPhrase": chosenFiller?.phrase ?? ""
+                            "preResponseFillerPhrase": chosenFiller?.phrase ?? "",
+                            "preResponseFillerDelayMs": chosenFiller == nil
+                                ? 0
+                                : StreamingTTSSession.preResponseFillerDelayMilliseconds
                         ]
                     )
                 }
 
-                // Schedule the pre-baked filler the instant the session
-                // opens. The first LLM sentence enqueues behind it via
-                // the chain ordering, so the user hears "let me take a
-                // look." while the model is still thinking. The system
-                // prompt was already augmented above with the exact
-                // text of this filler so Haiku's reply continues from
-                // it instead of restarting.
+                // Schedule the pre-baked filler after a short natural
+                // thinking beat. The first LLM sentence enqueues behind
+                // it via the chain ordering, so the user hears the filler
+                // at roughly 300-500ms, then the substantive continuation.
+                // The system prompt was already augmented above with the
+                // exact text of this filler so Haiku's reply continues
+                // from it instead of restarting.
                 if let chosenFiller {
                     streamingTTSSession.enqueuePrebakedSamples(chosenFiller.samples)
                 }
@@ -12945,6 +13952,9 @@ final class CompanionManager: ObservableObject {
                         modelResponseFields["assistantPrefillUsed"] = assistantPrefillText != nil
                         modelResponseFields["preResponseFillerUsed"] = chosenFiller != nil
                         modelResponseFields["preResponseFillerPhrase"] = chosenFiller?.phrase ?? ""
+                        modelResponseFields["preResponseFillerDelayMs"] = chosenFiller == nil
+                            ? 0
+                            : StreamingTTSSession.preResponseFillerDelayMilliseconds
                         return modelResponseFields
                     }()
                 )
@@ -13187,7 +14197,9 @@ final class CompanionManager: ObservableObject {
                     // its engine tears down cleanly.
                     streamingTTSSession.cancel()
                 }
-                var completionFields = self.voiceResponseExecutionFields()
+                var completionFields = self.voiceResponseExecutionFields(
+                    effectiveModelID: visualAnalysisModelID == self.selectedModel ? nil : visualAnalysisModelID
+                )
                 completionFields["spokenTextLength"] = spokenText.count
                 completionFields["pointed"] = parseResult.coordinate != nil
                 completionFields["audioPlaybackState"] = Self.voiceResponseCompletionAudioPlaybackState(
@@ -13371,13 +14383,7 @@ final class CompanionManager: ObservableObject {
         source: String,
         onTextChunk: @MainActor @Sendable @escaping (String) -> Void
     ) async throws -> String {
-        let selectedVoiceResponseModel = OpenClickyModelCatalog.voiceResponseModel(withID: selectedModel)
-        let modelID: String
-        if OpenClickyModelCatalog.isSpeechModelID(selectedVoiceResponseModel.id) || selectedVoiceResponseModel.provider == .deepgram {
-            modelID = OpenClickyModelCatalog.defaultVoiceResponseModelID
-        } else {
-            modelID = selectedVoiceResponseModel.id
-        }
+        let modelID = OpenClickyModelCatalog.voiceAnalysisModel(withID: selectedModel).id
 
         OpenClickyMessageLogStore.shared.append(
             lane: "visual",
@@ -13426,7 +14432,10 @@ final class CompanionManager: ObservableObject {
         assistantPrefill: String? = nil,
         onTextChunk: @MainActor @Sendable @escaping (String) -> Void
     ) async throws -> String {
-        let selectedVoiceResponseModel = OpenClickyModelCatalog.voiceResponseModel(withID: modelID ?? selectedModel)
+        let requestedModelID = modelID ?? selectedModel
+        let selectedVoiceResponseModel = OpenClickyModelCatalog.isSpeechModelID(requestedModelID)
+            ? OpenClickyModelCatalog.voiceAnalysisModel(withID: requestedModelID)
+            : OpenClickyModelCatalog.voiceResponseModel(withID: requestedModelID)
         applyVoiceResponseModelSettings(selectedVoiceResponseModel)
 
         switch selectedVoiceResponseModel.provider {
@@ -13545,9 +14554,9 @@ final class CompanionManager: ObservableObject {
         userPrompt: String,
         onTextChunk: @MainActor @Sendable @escaping (String) -> Void
     ) async throws -> String {
+        let modelOption = OpenClickyModelCatalog.voiceAnalysisModel(withID: model)
         if AppBundleConfiguration.openAIAPIKey() != nil {
             do {
-                let modelOption = OpenClickyModelCatalog.voiceResponseModel(withID: model)
                 openAIAPI.model = modelOption.id
                 openAIAPI.maxOutputTokens = modelOption.maxOutputTokens
                 let (text, _) = try await openAIAPI.analyzeImageStreaming(
@@ -13566,6 +14575,8 @@ final class CompanionManager: ObservableObject {
                     fields: [
                         "from": "openai_api_key",
                         "to": "codex_voice_session",
+                        "model": modelOption.id,
+                        "codexFallbackModel": OpenClickyModelCatalog.codexVoiceSessionModel(withID: modelOption.id).id,
                         "error": error.localizedDescription
                     ]
                 )
@@ -13574,7 +14585,7 @@ final class CompanionManager: ObservableObject {
 
         return try await analyzeCodexVoiceResponse(
             images: images,
-            model: model,
+            model: modelOption.id,
             systemPrompt: systemPrompt,
             conversationHistory: conversationHistory,
             userPrompt: userPrompt,
@@ -13590,7 +14601,8 @@ final class CompanionManager: ObservableObject {
         userPrompt: String,
         onTextChunk: @MainActor @Sendable @escaping (String) -> Void
     ) async throws -> String {
-        codexVoiceSession.model = model
+        let modelOption = OpenClickyModelCatalog.codexVoiceSessionModel(withID: model)
+        codexVoiceSession.model = modelOption.id
         let (text, _) = try await codexVoiceSession.analyzeImageStreaming(
             images: images,
             systemPrompt: systemPrompt,
@@ -13604,7 +14616,8 @@ final class CompanionManager: ObservableObject {
     private static func shouldUsePreResponseFiller(
         transcript: String,
         screenContextNeeded: Bool,
-        modelProvider: OpenClickyModelProvider
+        modelProvider: OpenClickyModelProvider,
+        ttsProvider: OpenClickyTTSProvider
     ) -> Bool {
         let commandText = normalizedSpokenCommandText(transcript)
         let wordCount = commandText.split(whereSeparator: { !$0.isLetter && !$0.isNumber }).count
@@ -13620,14 +14633,44 @@ final class CompanionManager: ObservableObject {
         ]
         if acknowledgementPhrases.contains(commandText) { return false }
 
-        // Disabled for now: the logs show the stitched pre-response
-        // phrases sound worse than the latency they hide, especially on
-        // short text-only turns and ambiguous prompts like "is this quick".
-        // Keep the decision point here so we can re-enable a better UX
-        // later (for example a non-spoken visual spinner or earcon).
-        _ = screenContextNeeded
-        _ = modelProvider
-        return false
+        // Do not put spoken filler in front of direct control commands.
+        // Those turns should either execute immediately or produce a
+        // concrete handoff/status, not "yeah, that makes sense."
+        let directActionPrefixes = [
+            "open ", "play ", "pause ", "click ", "press ", "type ",
+            "select ", "scroll ", "switch ", "bring ", "move ",
+            "close ", "quit ", "launch "
+        ]
+        if directActionPrefixes.contains(where: commandText.hasPrefix) {
+            return false
+        }
+
+        // Speech-to-speech Realtime already provides its own immediate
+        // audio path; adding cached TTS filler would create a double voice.
+        if ttsProvider == .openAIRealtime {
+            return false
+        }
+
+        // Deepgram Voice Agent owns the whole voice turn when selected as
+        // the response model. If this path is reached for analysis only,
+        // keep fillers off to avoid cross-provider audio seams.
+        if modelProvider == .deepgram {
+            return false
+        }
+
+        if screenContextNeeded {
+            return true
+        }
+
+        // For Cartesia/ElevenLabs/Edge/Deepgram-TTS text turns, use a
+        // cached opener only when the user has asked a real multi-word
+        // question or investigation. Short acknowledgements stay crisp.
+        switch ttsProvider {
+        case .cartesia, .elevenLabs, .microsoftEdge, .deepgram:
+            return wordCount >= 6
+        case .openAIRealtime:
+            return false
+        }
     }
 
     private static let visualFollowUpHistoryDepth = 3
@@ -13780,9 +14823,21 @@ final class CompanionManager: ObservableObject {
         onTextChunk: @MainActor @Sendable @escaping (String) -> Void
     ) async throws -> String {
         let selectedPointingModel = OpenClickyModelCatalog.computerUseModel(withID: selectedComputerUseModel)
+        let resolver = Self.computerUsePointingResolver(
+            selectedVoiceModelID: selectedModel,
+            selectedComputerUseModelID: selectedComputerUseModel
+        )
 
-        switch selectedPointingModel.provider {
-        case .anthropic:
+        switch resolver {
+        case .openAIRealtime:
+            let text = try await openAIRealtimeSpeechClient.analyzeImageResponse(
+                images: [image],
+                systemPrompt: systemPrompt,
+                userPrompt: userPrompt,
+                onTextChunk: onTextChunk
+            )
+            return text
+        case .anthropicAPI:
             return try await analyzeClaudeResponse(
                 images: [image],
                 model: selectedPointingModel.id,
@@ -13790,7 +14845,7 @@ final class CompanionManager: ObservableObject {
                 userPrompt: userPrompt,
                 onTextChunk: onTextChunk
             )
-        case .codex:
+        case .codexCLI:
             let detector = CodexPointDetector(model: selectedPointingModel.id)
             let text = try await detector.detectPointTag(
                 screenshotData: image.data,
@@ -13802,13 +14857,7 @@ final class CompanionManager: ObservableObject {
             )
             onTextChunk(text)
             return text
-        case .deepgram:
-            throw NSError(
-                domain: "DeepgramVoiceAgentClient",
-                code: -21,
-                userInfo: [NSLocalizedDescriptionKey: "Deepgram Voice Agent is not a pointing model."]
-            )
-        case .openAI:
+        case .openAIResponses:
             openAIAPI.model = selectedPointingModel.id
             let (text, _) = try await openAIAPI.analyzeImage(
                 images: [image],
@@ -13817,6 +14866,35 @@ final class CompanionManager: ObservableObject {
             )
             onTextChunk(text)
             return text
+        case .unsupported:
+            throw NSError(
+                domain: "OpenClickyComputerUsePointing",
+                code: -21,
+                userInfo: [NSLocalizedDescriptionKey: "\(selectedPointingModel.id) is not a supported pointing model."]
+            )
+        }
+    }
+
+    private static func computerUsePointingResolver(
+        selectedVoiceModelID: String,
+        selectedComputerUseModelID: String
+    ) -> OpenClickyComputerUsePointingResolver {
+        let voiceModel = OpenClickyModelCatalog.voiceResponseModel(withID: selectedVoiceModelID)
+        if voiceModel.provider == .openAI,
+           OpenClickyModelCatalog.isSpeechModelID(voiceModel.id) {
+            return .openAIRealtime
+        }
+
+        let pointingModel = OpenClickyModelCatalog.computerUseModel(withID: selectedComputerUseModelID)
+        switch pointingModel.provider {
+        case .anthropic:
+            return .anthropicAPI
+        case .codex:
+            return .codexCLI
+        case .openAI:
+            return .openAIResponses
+        case .deepgram:
+            return .unsupported
         }
     }
 
@@ -14506,7 +15584,6 @@ final class CompanionManager: ObservableObject {
             return
         }
 
-        interruptCurrentVoiceResponse()
         clearDetectedElementLocation()
 
         Task {
@@ -14517,6 +15594,11 @@ final class CompanionManager: ObservableObject {
                 },
                 submitDraftText: { [weak self] finalTranscript in
                     self?.handleFinalVoiceTranscript(finalTranscript)
+                },
+                onWillStartRecording: { [weak self] in
+                    // Avoid chopping the previous reply if the user taps the
+                    // mic button and releases before dictation really starts.
+                    self?.interruptCurrentVoiceResponse()
                 }
             )
         }
@@ -15011,9 +16093,43 @@ extension CompanionManager {
         return (request.key, request.modifiers)
     }
 
+    static func testWebOpenTarget(from transcript: String) -> (url: String, browserAppName: String?)? {
+        guard let request = webOpenRequest(from: transcript) else { return nil }
+        return (request.url.absoluteString, request.browserAppName)
+    }
+
     static func testCompositeAppAction(from transcript: String) -> (appName: String, actionText: String)? {
         guard let request = compositeAppActionRequest(from: transcript) else { return nil }
         return (request.appName, request.actionText)
+    }
+
+    static func testSpotifyPlaybackQuery(from transcript: String) -> String? {
+        guard let request = compositeAppActionRequest(from: transcript),
+              request.appName == "Spotify" else { return nil }
+        return spotifyPlaybackQuery(from: request.actionText)
+    }
+
+    static func testStandaloneSpotifyPlaybackQuery(from transcript: String) -> String? {
+        guard let request = standaloneSpotifyPlaybackRequest(from: transcript),
+              request.appName == "Spotify" else { return nil }
+        return spotifyPlaybackQuery(from: request.actionText)
+    }
+
+    static func testSpotifySearchPlayExecutionMethods(
+        for backend: OpenClickyComputerUseBackendID
+    ) -> (started: String, completed: String) {
+        let method = spotifySearchPlayExecutionMethod(for: backend)
+        return (method, method)
+    }
+
+    static func testComputerUsePointingResolver(
+        selectedVoiceModelID: String,
+        selectedComputerUseModelID: String
+    ) -> String {
+        computerUsePointingResolver(
+            selectedVoiceModelID: selectedVoiceModelID,
+            selectedComputerUseModelID: selectedComputerUseModelID
+        ).rawValue
     }
 }
 #endif
