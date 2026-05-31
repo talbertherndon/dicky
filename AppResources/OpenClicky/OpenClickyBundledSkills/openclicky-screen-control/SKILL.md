@@ -30,7 +30,7 @@ Important cursor model:
 
 ## Coordinates
 
-Use macOS/AppKit screen coordinates: origin at the bottom-left of the global desktop. Use screenshot context, window geometry, or visible UI positions to estimate points. It is better to point approximately immediately than to spend a long time calculating.
+Use macOS/AppKit screen coordinates: origin at the bottom-left of the global desktop. Use screenshot context, window geometry, or visible UI positions to estimate points. Accuracy matters less than relevance: only point when the target is clearly connected to the user's current request. Never point at an unrelated control just to provide a visual cue.
 
 ## Fast commands
 
@@ -161,12 +161,13 @@ curl -N http://127.0.0.1:32123/events
 
 When the user says "show me where you mean", "show me how to", "how do I do this", "point to it", or similar:
 
-1. If you already know the coordinate, immediately call `openclicky_point` or `/cursor` with the best available coordinate.
-2. If you do not know the coordinate, immediately call `/screenshot`, inspect it, then call `openclicky_point` or `/cursor`.
-3. Keep captions short: 3-8 words is ideal.
-4. Do not start a new agent just to point.
-5. Do not narrate a long explanation first; show the on-screen cue first, then add text only if needed.
-6. If exact coordinates are unknown, point to the approximate region and say what to look for.
+1. Point only at a visible target that is directly relevant to the user's current question, instruction, or next step.
+2. If you already know that relevant coordinate, immediately call `openclicky_point` or `/cursor` with the best available coordinate.
+3. If you do not know the coordinate, immediately call `/screenshot`, inspect it, and point only if the relevant target is visible.
+4. If the relevant target is not visible or the connection is ambiguous, do not point; answer briefly or ask for the missing context instead.
+5. Keep captions short: 3-8 words is ideal.
+6. Do not start a new agent just to point.
+7. Do not narrate a long explanation first when a relevant target is visible; show the on-screen cue first, then add text only if needed.
 
 Example response flow:
 

@@ -50,7 +50,7 @@ final class CodexPointDetector {
         User request:
         \(userQuestion)
 
-        Return only the final user-facing sentence plus exactly one [POINT:x,y:label] tag. Use [POINT:none] if there is no useful visible target.
+        Return only the final user-facing sentence plus exactly one [POINT:x,y:label] tag. Use [POINT:none] if there is no directly relevant visible target, the target is ambiguous, or the request is conceptual.
         """
 
         return try await runCodex(prompt: prompt, imageURLs: [imageURL], workingDirectory: temporaryDirectory)
@@ -112,7 +112,7 @@ final class CodexPointDetector {
         displayHeightInPoints: Int
     ) async -> CGPoint? {
         let systemPrompt = """
-        You are OpenClicky's screen pointing detector. Look at the screenshot and identify the single visible UI element that best answers the user's request. If the request is conceptual or no visible target helps, return [POINT:none].
+        You are OpenClicky's screen pointing detector. Look at the screenshot and identify the single visible UI element only when it directly answers the user's current request. Do not select unrelated, nearby, generic, decorative, stale, or merely available UI. If the request is conceptual, the target is not visible, or relevance is uncertain, return [POINT:none].
 
         Coordinates must use screenshot pixel space. Origin is top-left, x increases rightward, y increases downward. Return only this exact format:
         [POINT:x,y:label]

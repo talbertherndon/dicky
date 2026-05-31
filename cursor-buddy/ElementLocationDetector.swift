@@ -172,9 +172,9 @@ class ElementLocationDetector {
         let userPrompt = """
         The user asked this question while looking at their screen: "\(userQuestion)"
 
-        Look at the screenshot. If there is a specific UI element (button, link, menu item, text field, icon, etc.) that the user should interact with or is asking about, click on that element.
+        Look at the screenshot. Select a UI element only when it is visibly present and directly relevant to the user's current question or task: the exact button, link, menu item, text field, icon, or visible object they should interact with or are asking about.
 
-        If the question is purely conceptual (e.g., "what does HTML mean?") and there's no specific element to point to, just respond with text saying "no specific element".
+        Do not choose generic, nearby, decorative, or merely available UI. Do not point at unrelated items just because the screen contains clickable controls. If the question is conceptual, the requested target is not visible, the relationship is ambiguous, or you are not confident the element is the right next target, respond with text saying "no specific element".
         """
 
         let body: [String: Any] = [

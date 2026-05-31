@@ -520,11 +520,14 @@ final class OpenClickyDynamicNotchKitBridge {
         model.openMainPanel = openMainPanel
         model.submitText = submitText
         Task {
-            if opensExpanded {
-                model.isExpanded = true
+            // Voice state can update many times while OpenClicky is thinking or
+            // speaking. Preserve a user-expanded notch across those refreshes
+            // instead of immediately compacting it again on the next status tick.
+            let shouldShowExpanded = opensExpanded || model.isExpanded
+            model.isExpanded = shouldShowExpanded
+            if shouldShowExpanded {
                 await expandNotch(on: screen)
             } else {
-                model.isExpanded = false
                 await compactNotch(on: screen)
             }
         }

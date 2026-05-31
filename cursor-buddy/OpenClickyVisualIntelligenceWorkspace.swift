@@ -57,8 +57,8 @@ private enum OpenClickyVisualWorkspaceTab: String, CaseIterable, Identifiable {
 
     var title: String {
         switch self {
-        case .camera: return "Camera"
-        case .meeting: return "Meeting Notes"
+        case .camera: return "Visual Intelligence Playground"
+        case .meeting: return "Meeting Notes Playground"
         }
     }
 
@@ -122,7 +122,7 @@ struct OpenClickyVisualIntelligenceWorkspaceView: View {
             .frame(width: 42, height: 42)
 
             VStack(alignment: .leading, spacing: 3) {
-                Text("Visual Intelligence")
+                Text(selectedTab.title)
                     .font(.system(size: 20, weight: .semibold, design: .rounded))
                     .foregroundColor(DS.Colors.textPrimary)
                 Text("Camera understanding, OCR, object identification, and meeting notes with mic/camera/screen/computer-audio inputs.")
@@ -172,10 +172,10 @@ struct OpenClickyVisualIntelligenceWorkspaceView: View {
             Spacer()
 
             VStack(alignment: .leading, spacing: 6) {
-                Label("Privacy first", systemImage: "lock.shield")
+                Label("Experimental screens", systemImage: "sparkles")
                     .font(.system(size: 11, weight: .semibold))
                     .foregroundColor(DS.Colors.textSecondary)
-                Text("Camera frames and meeting snapshots are sent to the selected vision model only when you click Analyze or start meeting notes.")
+                Text("These are experimental screens testing features.")
                     .font(.system(size: 10, weight: .medium))
                     .foregroundColor(DS.Colors.textTertiary)
                     .fixedSize(horizontal: false, vertical: true)

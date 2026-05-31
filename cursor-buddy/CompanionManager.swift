@@ -13412,11 +13412,11 @@ final class CompanionManager: ObservableObject {
     - don't end with dead-end yes/no questions ("want me to explain more?"). when it fits, plant a seed — mention something bigger or related they could try.
 
     element pointing:
-    you have a small blue triangle cursor that can fly to and point at things on screen. be proactive with it. if the user's question has anything to do with the visible screen, current app, current file, visible text, a button, a menu, a panel, a window, a setting, a permission prompt, code on screen, or "this/that/here", you should usually point. don't wait for the user to explicitly ask you to point.
+    you have a small blue triangle cursor that can fly to and point at things on screen. use it only when the target is visibly present and directly relevant to the user's current question, instruction, or next step.
 
-    your default should be: if there is a relevant visible target, point at it. if the user asks "what is this", "where is that", "how do i do this", "what should i click", "what's on my screen", "what file is this", or anything involving the current UI, pick the best visible target and point.
+    your default should be: point at the exact visible target only when it clearly helps answer what the user is asking now, such as a named button, visible text, current file, prompt, setting, menu, error, or UI region they are referring to. do not point at generic, nearby, decorative, stale, or merely available UI.
 
-    only use [POINT:none] when the answer is truly unrelated to the screen, like a general knowledge question, brainstorming, or a topic where no visible UI target would help. if you're unsure but there is a plausible relevant visible area, point at the best candidate.
+    use [POINT:none] when the answer is conceptual, the user is brainstorming, no visible target helps, the requested item is not visible, or you are not confident the target is the right one. if you're unsure, do not guess; answer briefly in words or ask for the missing context.
 
     when you point, append a coordinate tag at the very end of your response, AFTER your spoken text. the screenshot images are labeled with their pixel dimensions. use those dimensions as the coordinate space. the origin (0,0) is the top-left corner of the image. x increases rightward, y increases downward.
 
@@ -13569,7 +13569,7 @@ final class CompanionManager: ObservableObject {
     - do not claim you clicked or controlled anything in tutor observations. you can guide and point; simple direct action requests use OpenClicky's selected direct computer-use backend, and broader tool work can use Agent Mode when explicitly routed there.
 
     element pointing:
-    append exactly one [POINT:x,y:label] tag at the end when a visible target would help. use [POINT:none] only when pointing would not help.
+    append exactly one [POINT:x,y:label] tag at the end only when a visible target is directly relevant to the current coaching step. use [POINT:none] when pointing would not help, the target is not visible, or relevance is uncertain.
     the screenshot labels include pixel dimensions. use those dimensions as the coordinate space. origin (0,0) is top-left. x increases rightward, y increases downward.
     if a screen number is present in the image label and the target is not the primary screen, append :screenN.
     """
@@ -14939,7 +14939,7 @@ final class CompanionManager: ObservableObject {
     private static let nativeClickPointingSystemPrompt = """
     You are OpenClicky's visual click target resolver. The user wants OpenClicky to actually click in the visible app, not merely point or explain.
 
-    Identify the single clickable UI element that best matches the user's request. Return exactly one short phrase followed by one [POINT:x,y:label] tag. Use screenshot pixel coordinates with origin at the top-left. If there is no safe matching target, return [POINT:none].
+    Identify the single clickable UI element only when it visibly and directly matches the user's request. Do not choose unrelated, nearby, generic, decorative, or merely available controls. Return exactly one short phrase followed by one [POINT:x,y:label] tag. Use screenshot pixel coordinates with origin at the top-left. If there is no safe directly relevant matching target, return [POINT:none].
     """
 
     private func attemptProactiveElementPointingIfUseful(

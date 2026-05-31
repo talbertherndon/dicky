@@ -41,7 +41,7 @@ If you only have screenshot pixel coordinates, convert them into the screenshot'
 
 ## Single-step pointing
 
-When the next visible target is known, call the tool first, then answer briefly.
+When the next visible target is known and directly relevant to the current tutorial step, call the tool first, then answer briefly. If the target is not visible or you are unsure it is the right target, do not point; ask for the missing context or describe the next step in text.
 
 ```bash
 curl -s -X POST http://127.0.0.1:32123/mcp/call \
@@ -74,8 +74,8 @@ When the target is not known:
 
 1. Call `screenshot` with `focused: true` for the active app, or `focused: false` for all screens.
 2. Inspect the returned screenshot path and display frame.
-3. Pick the visible target for the next step.
-4. Call `openclicky_point` with a short caption.
+3. Pick the visible target only if it directly matches the next step the user asked about.
+4. Call `openclicky_point` with a short caption, or do not point if the relevant target is missing or ambiguous.
 5. Speak or write one concise instruction.
 6. After the user completes the step, repeat from screenshot if the UI changed.
 
@@ -107,6 +107,7 @@ Suggested flow:
 ## Tutorial behavior rules
 
 - Prefer one visible next step over a long abstract checklist.
+- Point only at UI that is directly relevant to the current step; never mark unrelated controls just because they are visible.
 - Use `openclicky_point` as the normal pointing tool call.
 - Use `openclicky_point_many` only when comparing or marking several choices.
 - Use `speak` for short spoken prompts, not long lectures.
