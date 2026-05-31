@@ -12513,7 +12513,7 @@ final class CompanionManager: ObservableObject {
         - selected computer-use backend: \(backend.rawValue) (\(backend.label))
         - selected computer-use model: \(computerUseModel.id) (\(computerUseModel.provider.rawValue), \(computerUseModel.label))
         - background Agent Mode model: \(codexAgentSession.model)
-        - keep spoken voice inference on the realtime model. for direct computer-control requests, call OpenClicky's computer-use tool so the app can execute through the selected backend. for deeper file, code, research, settings, logs, or multi-step work, call the background-agent tool so Agent Mode can run on the full configured model.
+        - keep spoken voice inference on the realtime model. for direct computer-control requests, including app-plus-action commands like "open Spotify and play a track", call OpenClicky's computer-use tool so the app can execute through the selected backend. do not route ordinary app control to Agent Mode just because it has more than one step. for deeper file, code, research, settings, logs, builds, installs, or long-running work, call the background-agent tool so Agent Mode can run on the full configured model.
         """
     }
 

@@ -1938,7 +1938,7 @@ final class OpenAIRealtimeSpeechClient: OpenClickyTTSClient {
         [
             "type": "function",
             "name": "openclicky_use_computer",
-            "description": "Route a direct Mac control request through OpenClicky's selected computer-use backend. Use this for opening apps, focused-window typing, key presses, clicking, or other direct computer actions.",
+            "description": "Route a direct Mac control request through OpenClicky's selected computer-use backend. Use this for opening apps, app-plus-action requests such as opening an app and doing something inside it, focused-window typing, key presses, clicking, or other direct computer actions. Do not use the background-agent tool for ordinary app control just because it has more than one step.",
             "parameters": [
                 "type": "object",
                 "properties": [
@@ -1954,7 +1954,7 @@ final class OpenAIRealtimeSpeechClient: OpenClickyTTSClient {
         [
             "type": "function",
             "name": "openclicky_start_background_agent",
-            "description": "Route deeper work to OpenClicky's background Agent Mode full model. Use this for code, files, research, settings, logs, memory, builds, installs, refactors, or multi-step tool work.",
+            "description": "Route deeper work to OpenClicky's background Agent Mode full model. Use this for code, files, research, settings, logs, memory, builds, installs, refactors, or long-running work. Do not use this for ordinary app control; use openclicky_use_computer instead.",
             "parameters": [
                 "type": "object",
                 "properties": [

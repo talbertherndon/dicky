@@ -2523,11 +2523,15 @@ struct OpenClickyNotchPanelView: View {
         quickPrompt = ""
         quickPromptAttachments.removeAll()
         quickPromptDroppedPathFragments.removeAll()
-        companionManager.submitNewAgentTaskFromUI(
-            promptWithAttachments(trimmedPrompt, attachments: attachments),
-            source: "open_clicky_panel_ask"
-        )
-        selectedTab = .agents
+        if attachments.isEmpty {
+            companionManager.submitTextPrompt(trimmedPrompt)
+        } else {
+            companionManager.submitNewAgentTaskFromUI(
+                promptWithAttachments(trimmedPrompt, attachments: attachments),
+                source: "open_clicky_panel_ask"
+            )
+            selectedTab = .agents
+        }
         notifyPanelSizeChanged()
     }
 
