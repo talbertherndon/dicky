@@ -1,4 +1,4 @@
-# Dicky
+# Dicky (OpenClicky)
 
 Dicky is a native macOS menu-bar companion. It hosts Clicky, an AI companion that provides push-to-talk voice help, screen-aware responses, image gallery views, local agent work, and a cursor overlay for pointing at UI elements.
 
@@ -270,7 +270,7 @@ Dicky uses Sparkle for direct-distribution OTA updates. Installed builds check t
 
 [Clicky](https://github.com/farzaa/clicky) is a real project by [Farza](https://github.com/farzaa) and is believed to help a lot of people. **Dicky** is not that: it is a personal fork and joke build maintained for fun, not as a serious product.
 
-**Dicky** is maintained by [Talbert Herndon](https://github.com/talbertherndon).
+(**Dicky** is maintained by [Talbert Herndon](https://github.com/talbertherndon).
 
 This fork builds on [OpenClicky](https://github.com/jasonkneen/openclicky) by [Jason Kneen](https://github.com/jasonkneen), which extended the original open-source Clicky work:
 
