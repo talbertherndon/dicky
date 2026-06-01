@@ -1,8 +1,8 @@
-# OpenClicky
+# Dicky
 
-OpenClicky is a native macOS menu-bar companion by Jason Kneen. It hosts Clicky, an AI companion that provides push-to-talk voice help, screen-aware responses, image gallery views, local agent work, and a cursor overlay for pointing at UI elements.
+Dicky is a native macOS menu-bar companion. It hosts Clicky, an AI companion that provides push-to-talk voice help, screen-aware responses, image gallery views, local agent work, and a cursor overlay for pointing at UI elements.
 
-OpenClicky uses local configuration only. There is no Google login requirement and no hosted key-sync flow.
+Dicky uses local configuration only. There is no Google login requirement and no hosted key-sync flow.
 
 ## Clicky At A Glance
 
@@ -29,7 +29,7 @@ Clicky prefers structured routes over visible UI whenever possible:
 - spawn child workers for substantial builds, research, artifact work, connected-app actions, or multi-step GUI tasks
 - keep same-context work in `sessions_send` and start new work in `sessions_spawn`
 - prefer integration routes such as GitHub via Composio MCP before falling back to browser or window automation
-- use OpenClicky's computer-use path only as the last-mile fallback for native Mac or browser actions
+- use Dicky's computer-use path only as the last-mile fallback for native Mac or browser actions
 
 ## Requirements
 
@@ -43,22 +43,22 @@ Clicky prefers structured routes over visible UI whenever possible:
 - `cursor-buddy.xcodeproj` and `cursor-buddy/` contain the macOS app target.
 - `cursor-buddyTests/` contains focused app tests.
 - `cursor-buddyUITests/` contains UI test scaffolding.
-- `AppResources/OpenClicky/` contains bundled model instructions, skills, wiki seed, Codex runtime, and completion audio.
+- `AppResources/OpenClicky/` contains bundled model instructions, skills, wiki seed, Codex runtime, and completion audio (upstream OpenClicky resource pack).
 - `appcast.xml`, `clicky-demo.gif`, and `dmg-background.png` support distribution and release packaging.
 - `docs/APP_UPDATES.md` documents the Sparkle update feed and direct-distribution release flow.
 
-The legacy `cursor-buddy` folder and scheme names are kept for project continuity. The product, bundle display name, and app identity are OpenClicky.
+The legacy `cursor-buddy` folder and scheme names are kept for project continuity. The product display name and app identity are Dicky.
 
 ## Secrets
 
 Do not commit API keys to this repository.
 
-OpenClicky can read local secrets from:
+Dicky can read local secrets from:
 
 - the in-app Settings fields
 - launch environment variables
-- a secrets file at `~/.config/openclicky/secrets.env`
-- a custom file path set with `OPENCLICKY_SECRETS_FILE`
+- a secrets file at `~/.config/dicky/secrets.env`
+- a custom file path set with `DICKY_SECRETS_FILE`
 
 Supported values:
 
@@ -69,15 +69,15 @@ ELEVENLABS_VOICE_ID=your_elevenlabs_voice_id
 OPENAI_API_KEY=your_openai_or_codex_key
 ```
 
-Google Workspace access is intentionally handled through local tooling, not OpenClicky-hosted Google login or key sync. See [Google Workspace via gogcli](#google-workspace-via-gogcli).
+Google Workspace access is intentionally handled through local tooling, not Dicky-hosted Google login or key sync. See [Google Workspace via gogcli](#google-workspace-via-gogcli).
 
 Recommended local setup:
 
 ```sh
-mkdir -p ~/.config/openclicky
-chmod 700 ~/.config/openclicky
-$EDITOR ~/.config/openclicky/secrets.env
-chmod 600 ~/.config/openclicky/secrets.env
+mkdir -p ~/.config/dicky
+chmod 700 ~/.config/dicky
+$EDITOR ~/.config/dicky/secrets.env
+chmod 600 ~/.config/dicky/secrets.env
 ```
 
 The repo `.gitignore` excludes `.env` and `.env.local`, but the app no longer reads repo-local `.env` files. Keep secrets outside the project directory.
@@ -93,7 +93,7 @@ open cursor-buddy.xcodeproj
 In Xcode:
 
 1. Select the `cursor-buddy` scheme.
-2. Select the OpenClicky app target.
+2. Select the Dicky app target.
 3. Set your signing team.
 4. Run the app with `Cmd+R`.
 5. Grant Accessibility, Microphone, and Screen Recording permissions when macOS asks.
@@ -110,31 +110,31 @@ The external-control bridge can be checked with:
 scripts/test-external-control-bridge.sh
 ```
 
-The script performs Swift parse/typecheck checks, verifies the local bridge, exercises MCP descriptors, screenshot capture, captions, secondary cursors, SSE events, and confirms that primary cursor guidance uses OpenClicky's native choreography without warping the real system pointer.
+The script performs Swift parse/typecheck checks, verifies the local bridge, exercises MCP descriptors, screenshot capture, captions, secondary cursors, SSE events, and confirms that primary cursor guidance uses Dicky's native choreography without warping the real system pointer.
 
 ## External Control Bridge
 
-OpenClicky exposes a local-only control bridge for agents and other trusted local apps:
+Dicky exposes a local-only control bridge for agents and other trusted local apps:
 
 ```text
 http://127.0.0.1:32123
 ```
 
-The bridge is intentionally non-invasive. It drives OpenClicky's overlay, screenshots, and TTS, but does not start dictation, submit prompts, create new agent sessions, or mutate the normal OpenClicky conversation state.
+The bridge is intentionally non-invasive. It drives Dicky's overlay, screenshots, and TTS, but does not start dictation, submit prompts, create new agent sessions, or mutate the normal Dicky conversation state.
 
 Useful endpoints:
 
 - `GET /health` checks bridge status.
 - `GET /mcp/tools` lists MCP-style tool descriptors.
-- `POST /cursor` points with the primary OpenClicky cursor, or creates one secondary marker with `mode: "secondary"`.
+- `POST /cursor` points with the primary Dicky cursor, or creates one secondary marker with `mode: "secondary"`.
 - `POST /cursors` shows multiple temporary secondary markers at once.
 - `POST /caption` shows a short caption near a coordinate or the current cursor.
 - `POST /screenshot` captures local screenshots with display-frame metadata for locating UI.
-- `POST /speak` speaks through OpenClicky's TTS without entering voice mode.
+- `POST /speak` speaks through Dicky's TTS without entering voice mode.
 - `POST /clear` clears bridge-created overlay elements.
 - `GET /events` streams server-sent bridge events.
 
-Primary cursor behavior matters: default `/cursor` uses OpenClicky's existing smooth pointing choreography, the same behavior used by voice prompts like "show me the Apple menu". The OpenClicky triangle zips to the target, shows the caption, and returns to the real pointer. It should not warp the macOS pointer and should not draw a duplicate primary cursor.
+Primary cursor behavior matters: default `/cursor` uses Dicky's existing smooth pointing choreography, the same behavior used by voice prompts like "show me the Apple menu". The Dicky triangle zips to the target, shows the caption, and returns to the real pointer. It should not warp the macOS pointer and should not draw a duplicate primary cursor.
 
 Secondary cursors are explicit temporary markers. Use them for multi-point explanations, alternatives, or screen-tour overlays. They automatically disappear after `durationMs` or can be cleared with `/clear`.
 
@@ -174,9 +174,9 @@ Bundled agent skills for this bridge live in `AppResources/OpenClicky/OpenClicky
 
 ## Google Workspace via gogcli
 
-OpenClicky can connect agents to Google Workspace through the local [`gogcli`](https://github.com/steipete/gogcli) command, installed as `gog`. This keeps Google authentication local to the user's machine and avoids adding hosted OAuth, Google login, or cloud key sync to OpenClicky.
+Dicky can connect agents to Google Workspace through the local [`gogcli`](https://github.com/steipete/gogcli) command, installed as `gog`. This keeps Google authentication local to the user's machine and avoids adding hosted OAuth, Google login, or cloud key sync to Dicky.
 
-If gogcli uses the encrypted file keyring, OpenClicky agents need the same keyring password non-interactively. Put it in `~/.config/openclicky/secrets.env` as `GOG_KEYRING_PASSWORD=...`, or migrate gogcli to the macOS Keychain backend. If Google's OAuth screen says "Clicky", that branding comes from the local OAuth client stored in `~/Library/Application Support/gogcli/credentials.json`; replace it with an OpenClicky-owned Desktop OAuth client to change the consent-screen app name.
+If gogcli uses the encrypted file keyring, Dicky agents need the same keyring password non-interactively. Put it in `~/.config/dicky/secrets.env` as `GOG_KEYRING_PASSWORD=...`, or migrate gogcli to the macOS Keychain backend. If Google's OAuth screen says "Clicky", that branding comes from the local OAuth client stored in `~/Library/Application Support/gogcli/credentials.json`; replace it with a Dicky-owned Desktop OAuth client to change the consent-screen app name.
 
 Install on macOS:
 
@@ -184,7 +184,7 @@ Install on macOS:
 brew install gogcli
 ```
 
-Check status from OpenClicky Settings → Google, or from the terminal:
+Check status from Dicky Settings → Google, or from the terminal:
 
 ```sh
 scripts/check-gogcli-workspace.sh
@@ -234,7 +234,7 @@ Write actions such as sending email, posting Chat messages, modifying Drive file
 
 ## Swift SDK Embedding (Windowed)
 
-For Swift hosts that want an in-window OpenClicky instance that is separate from the OS-level menu-bar companion, use `OpenClickySDKSession` from `cursor-buddy/OpenClickySDK.swift`.
+For Swift hosts that want an in-window Dicky instance that is separate from the OS-level menu-bar companion, use `OpenClickySDKSession` from `cursor-buddy/OpenClickySDK.swift` (upstream type names retained in code).
 
 Example:
 
@@ -260,26 +260,26 @@ sdk.submitTextPrompt("Summarize this page")
 
 The host can either use SDK actions for Settings/HUD/Memory, or keep them no-op and route that experience separately.
 
-See [OpenClicky SDK Integration Guide](docs/OpenClickySDKIntegration.md) for step-by-step host app integration instructions.
+See [OpenClicky SDK Integration Guide](docs/OpenClickySDKIntegration.md) for step-by-step host app integration instructions (upstream doc; paths and types still use OpenClicky naming).
 
 ## Direct Updates
 
-OpenClicky uses Sparkle for direct-distribution OTA updates. Installed builds check the signed `appcast.xml` feed from this repository's `main` branch, then download and install signed release DMGs from GitHub Releases. See [docs/APP_UPDATES.md](docs/APP_UPDATES.md) for the release checklist and appcast item template.
+Dicky uses Sparkle for direct-distribution OTA updates. Installed builds check the signed `appcast.xml` feed from this repository's `main` branch, then download and install signed release DMGs from GitHub Releases. See [docs/APP_UPDATES.md](docs/APP_UPDATES.md) for the release checklist and appcast item template.
 
 ## Credits And Upstream Work
 
-OpenClicky is maintained by [Jason Kneen](https://github.com/jasonkneen).
+**Dicky** is maintained by [Talbert Herndon](https://github.com/talbertherndon).
 
-This project builds on the original open-source Clicky work:
+This fork builds on [OpenClicky](https://github.com/jasonkneen/openclicky) by [Jason Kneen](https://github.com/jasonkneen), which extended the original open-source Clicky work:
 
 - Original project: [farzaa/clicky](https://github.com/farzaa/clicky)
 - Original creator: Farza, GitHub [@farzaa](https://github.com/farzaa), X [@FarzaTV](https://x.com/farzatv)
 
-OpenClicky has also incorporated ideas and implementation patterns from these forks:
+OpenClicky incorporated ideas and implementation patterns from these forks, and Dicky inherits that lineage:
 
 - [@danpeg](https://github.com/danpeg)'s [danpeg/clicky](https://github.com/danpeg/clicky), reviewed locally as `clicky-teach`, for tutor-mode direction and idle observation behavior.
 - [@milind-soni](https://github.com/milind-soni)'s [milind-soni/tiptour-macos](https://github.com/milind-soni/tiptour-macos), for developer-menu/debug tooling patterns and related teaching-assistant UX ideas.
 
 ## License
 
-MIT. Copyright 2026 Jason Kneen. Portions are derived from or informed by the upstream MIT-licensed projects credited above.
+MIT. Copyright 2026 Talbert Herndon. Portions are derived from or informed by OpenClicky, Jason Kneen, and the upstream MIT-licensed projects credited above.
